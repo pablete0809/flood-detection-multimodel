@@ -1,0 +1,36 @@
+# Entorno virtual
+.venv/
+
+# Datos de satélite descargados (se regeneran con floodprob ingest)
+cache/
+
+# Resultados del pipeline (se regeneran con floodprob compare)
+outputs/
+
+# Python bytecode
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Claude Code internal files
+.claude/
+
+# Editores e IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Sistema operativo
+.DS_Store
+Thumbs.db
+
+# Datos raster grandes (se descargan/generan externamente, no caben en git)
+data/dem/*.tif
+data/labels/*.tif
+# Los .geojson en data/labels/ SÍ se incluyen (pequeños, necesarios para reproducibilidad)

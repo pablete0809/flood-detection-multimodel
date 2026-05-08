@@ -1,0 +1,24 @@
+{
+  "type": "FeatureCollection",
+  "name": "aoi_valencia_small",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "id": "valencia_small_test"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [-0.4350, 39.3350],
+            [-0.2850, 39.3350],
+            [-0.2850, 39.4550],
+            [-0.4350, 39.4550],
+            [-0.4350, 39.3350]
+          ]
+        ]
+      }
+    }
+  ]
+}

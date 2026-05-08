@@ -1,0 +1,25 @@
+{
+  "type": "FeatureCollection",
+  "name": "aoi_malaga",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "id": "guadalhorce_valley",
+        "description": "Valle del Guadalhorce — DANA diciembre 2025. Cubre Cártama, Campanillas, Alhaurín de la Torre, Pizarra y el corredor fluvial."
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [-4.7500, 36.5800],
+            [-4.4500, 36.5800],
+            [-4.4500, 36.8200],
+            [-4.7500, 36.8200],
+            [-4.7500, 36.5800]
+          ]
+        ]
+      }
+    }
+  ]
+}

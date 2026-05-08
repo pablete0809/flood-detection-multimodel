@@ -1,0 +1,60 @@
+run_name: valencia_riada_demo
+
+stac:
+  api_url: "https://planetarycomputer.microsoft.com/api/stac/v1"
+  collections:
+    s1: "sentinel-1-rtc"
+    s2: "sentinel-2-l2a"
+  auth:
+    type: "none"
+    token_env: ""
+  request_timeout_s: 60
+  max_items: 500
+
+aoi_geojson: "configs/aoi_valencia.geojson"
+crs_salida: "EPSG:25830"
+resolution_m: 10
+seed: 42
+
+time:
+  baseline: ["2024-08-01", "2024-09-30"]
+  targets:
+    - ["2024-10-28", "2024-11-02"]
+    - ["2024-11-03", "2024-11-08"]
+  historical_windows:
+    - ["2023-09-15", "2023-09-30"]
+    - ["2023-10-15", "2023-10-30"]
+    - ["2024-01-15", "2024-01-30"]
+    - ["2024-03-01", "2024-03-15"]
+    - ["2024-05-01", "2024-05-15"]
+
+filters:
+  s2_max_cloud: 30
+  s1_orbit_state: "both"
+  s1_polarizations: ["VV", "VH"]
+
+dem:
+  path: "data/dem/valencia_dem.tif"
+
+external_labels:
+  water: "data/labels/worldcover_water_valencia.tif"
+  flood: "data/labels/emsr773_flood_mask.geojson"
+
+outputs:
+  data_dir: "data"
+  cache_dir: "cache"
+  out_dir: "outputs"
+
+model:
+  water_model: "logreg"                # threshold_change | logreg
+  flood_given_water_model: "logreg"    # logreg | xgboost_if_available
+  calibration: "isotonic"              # isotonic | sigmoid
+  ensemble_n: 1
+  n_hist_windows: 5
+  tile_size: 128
+  threshold_change:
+    vv_db: -1.5
+    vh_db: -1.2
+  logreg:
+    c: 1.0
+    max_iter: 400
