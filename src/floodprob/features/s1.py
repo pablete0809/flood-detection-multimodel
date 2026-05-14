@@ -6,10 +6,10 @@ import xarray as xr
 
 def to_db(backscatter: xr.DataArray) -> xr.DataArray:
     valid = backscatter.where(backscatter > 0)
-    # Use xarray median (dask-safe) instead of np.nanmedian(backscatter.values)
-    # which triggers a numpy.ma IndexError with chunked dask arrays.
+    # Use quantile(0.5) instead of median(skipna=True): avoids np.ma.sort
+    # which has an IndexError bug in numpy >= 2.0 with chunked dask arrays.
     try:
-        median_val = float(backscatter.median(skipna=True).compute().item())
+        median_val = float(backscatter.quantile(0.5, skipna=True).compute().item())
     except Exception:
         median_val = float("nan")
     if np.isfinite(median_val) and median_val <= 1.0:
@@ -27,19 +27,35 @@ def compute_s1_baseline(ds_s1: xr.Dataset) -> xr.Dataset:
     vh_db = to_db(ds_s1["vh"])
     ratio_db = vv_db - vh_db
 
+    src_crs = vv_db.rio.crs
+
+    def _median(da: xr.DataArray) -> xr.DataArray:
+        result = da.quantile(0.5, dim="time", skipna=True).drop_vars("quantile").astype("float32")
+        if src_crs is not None:
+            result = result.rio.write_crs(src_crs)
+        return result
+
     baseline = xr.Dataset(
         {
-            "vv_db_base": vv_db.median(dim="time", skipna=True),
-            "vh_db_base": vh_db.median(dim="time", skipna=True),
-            "ratio_db_base": ratio_db.median(dim="time", skipna=True),
+            "vv_db_base":    _median(vv_db),
+            "vh_db_base":    _median(vh_db),
+            "ratio_db_base": _median(ratio_db),
         }
     )
     return baseline
 
 
 def compute_s1_target_features(ds_s1_target: xr.Dataset, baseline: xr.Dataset) -> xr.Dataset:
-    vv_db = to_db(ds_s1_target["vv"]).median(dim="time", skipna=True)
-    vh_db = to_db(ds_s1_target["vh"]).median(dim="time", skipna=True)
+    src_crs = ds_s1_target["vv"].rio.crs
+
+    def _median(da: xr.DataArray) -> xr.DataArray:
+        result = to_db(da).quantile(0.5, dim="time", skipna=True).drop_vars("quantile").astype("float32")
+        if src_crs is not None:
+            result = result.rio.write_crs(src_crs)
+        return result
+
+    vv_db = _median(ds_s1_target["vv"])
+    vh_db = _median(ds_s1_target["vh"])
     ratio_db = vv_db - vh_db
 
     feat = xr.Dataset(

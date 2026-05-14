@@ -38,9 +38,9 @@ dependencies = [
 
 [project.optional-dependencies]
 xgboost = ["xgboost>=2.0.3"]
-torch   = ["torch>=2.2.0"]
+torch   = ["torch>=2.2.0", "torchvision>=0.17.0"]
 notebook = ["jupyter>=1.0.0", "ipykernel>=6.29.0"]
-compare  = ["xgboost>=2.0.3", "torch>=2.2.0"]
+compare  = ["xgboost>=2.0.3", "torch>=2.2.0", "torchvision>=0.17.0", "segmentation-models-pytorch>=0.3.3"]
 
 [project.scripts]
 floodprob = "floodprob.cli:app"

@@ -1,4 +1,4 @@
-# floodprob-stac
+# flood-detection-multimodel
 
 Pipeline Python STAC-first para detección de inundaciones con Sentinel-1 y Sentinel-2. Dado un área geográfica (AOI) y fechas de interés, descarga imágenes SAR y ópticas automáticamente, extrae features por píxel, entrena modelos de clasificación y genera mapas GeoTIFF de probabilidad de inundación.
 
@@ -8,7 +8,7 @@ La probabilidad final se descompone mediante la Regla de la Probabilidad Total:
 P(inundación) = P(agua) × P(inundación | agua)
 ```
 
-Incluye un **framework de comparación de múltiples modelos** (Threshold, LogReg, Random Forest, XGBoost, MLP, U-Net) con métricas estándar y figuras publicables.
+Incluye un **framework de comparación de múltiples modelos** (Threshold, LogReg, Random Forest, XGBoost, MLP, U-Net, Attention U-Net, DeepLabV3+) con métricas estándar y figuras publicables.
 
 ---
 
@@ -29,7 +29,7 @@ Incluye un **framework de comparación de múltiples modelos** (Threshold, LogRe
 
 ## Requisitos
 
-- Python 3.11+
+- Python 3.10+
 - GDAL / rasterio instalados correctamente en el sistema
 - Acceso de red al endpoint STAC (CDSE o Planetary Computer)
 
@@ -67,7 +67,7 @@ pip install -e .
 
 ### 5. Instalar dependencias opcionales (recomendado)
 
-Instala **todas** las dependencias del framework de comparación (XGBoost + PyTorch):
+Instala **todas** las dependencias del framework de comparación (XGBoost + PyTorch + segmentation-models-pytorch):
 
 ```bash
 pip install -e ".[compare]"
@@ -79,7 +79,7 @@ O instálalas por separado:
 # Solo XGBoost
 pip install -e ".[xgboost]"
 
-# Solo PyTorch (modelo U-Net, requiere ~2 GB)
+# Solo PyTorch (U-Net, Attention U-Net, DeepLabV3+, requiere ~2 GB)
 pip install -e ".[torch]"
 
 # Notebooks Jupyter
@@ -87,6 +87,8 @@ pip install -e ".[notebook]"
 ```
 
 > **Nota:** Si `pip install -e ".[...]"` falla en tu shell, prueba con comillas simples: `pip install -e '.[compare]'`
+
+> **Nota:** Asegúrate de usar **siempre el Python del entorno virtual** (`source .venv/bin/activate`) antes de ejecutar cualquier comando `floodprob`. Si instalaste dependencias fuera del venv, los comandos fallarán.
 
 ---
 
@@ -128,14 +130,16 @@ pip install -e ".[notebook]"
 │   │   ├── train_rf.py               # ★ Random Forest (agua y flood)
 │   │   ├── train_xgboost_water.py    # ★ XGBoost para la cabeza de agua
 │   │   ├── train_mlp.py              # ★ MLP sklearn (agua y flood)
-│   │   └── train_unet.py             # ★ U-Net PyTorch sobre patches
+│   │   ├── train_unet.py             # ★ U-Net PyTorch sobre patches
+│   │   ├── train_attention_unet.py   # ★ Attention U-Net PyTorch (Oktay et al. 2018)
+│   │   └── train_deeplabv3plus.py    # ★ DeepLabV3+ via segmentation-models-pytorch
 │   └── utils/
 │       ├── geospatial.py             # Reproyección, clip, save_geotiff
 │       └── io.py                     # Caché, retries, JSON helpers
 └── pyproject.toml
 ```
 
-> ★ = ficheros nuevos del framework de comparación
+> ★ = ficheros del framework de comparación
 
 ---
 
@@ -178,7 +182,9 @@ floodprob stac-check --config configs/valencia_example.yaml
 
 ## Ejecución end-to-end
 
-Ejecuta los pasos **en orden**:
+Hay dos flujos según el objetivo:
+
+### Flujo A — modelo único (train/predict/evaluate)
 
 ```bash
 # 1. Verificar acceso al catálogo STAC
@@ -203,6 +209,20 @@ floodprob evaluate --config configs/valencia_example.yaml
 floodprob folium --config configs/valencia_example.yaml
 ```
 
+### Flujo B — comparación multi-modelo ★ (recomendado)
+
+Entrena y evalúa todos los modelos en una sola ejecución, generando figuras publicables. Solo requiere `preprocess` como paso previo.
+
+```bash
+# 1–3. Igual que el Flujo A (stac-check, ingest, preprocess)
+
+# 4. Comparar todos los modelos y generar figuras
+floodprob compare --config configs/valencia_example.yaml
+
+# Forzar re-entrenamiento aunque existan bundles cacheados
+floodprob compare --config configs/valencia_example.yaml --force-retrain
+```
+
 ---
 
 ## Comparación de modelos (`floodprob compare`)
@@ -218,7 +238,21 @@ El comando `compare` entrena y evalúa múltiples modelos en una sola ejecución
 | `random_forest` | agua + flood | Random Forest con CalibratedClassifierCV |
 | `xgboost` | agua + flood | XGBoost; requiere `pip install -e ".[xgboost]"` |
 | `mlp` | agua + flood | MLP 3 capas ocultas (sklearn, CPU) |
-| `unet` | flood | U-Net PyTorch sobre patches; requiere `pip install -e ".[torch]"` |
+| `unet` | flood | U-Net PyTorch 3-nivel con MC-Dropout; requiere `pip install -e ".[torch]"` |
+| `attention_unet` | flood | **★ NUEVO** Attention U-Net (Oktay et al. 2018) — puertas de atención en skip connections; requiere `.[torch]` |
+| `deeplabv3plus` | flood | **★ NUEVO** DeepLabV3+ encoder ResNet-34 con ASPP; requiere `pip install -e ".[compare]"` |
+
+### Arquitecturas de red neural
+
+#### U-Net (base)
+Encoder–decoder 3 niveles con skip connections directas. MC-Dropout para estimación de incertidumbre.
+Canales: `C_in → 16 → 32 → 64` (encoder), simétrico en decoder.
+
+#### Attention U-Net ★
+Igual que U-Net pero con **puertas de atención** (attention gates) en cada skip connection del decoder. La puerta aprende qué regiones del encoder son relevantes para la predicción de inundación, suprimiendo el ruido de fondo y amplificando las zonas inundadas. Implementación: Oktay et al. (2018) — formulación aditiva.
+
+#### DeepLabV3+ ★
+Encoder ResNet-34 con **ASPP** (Atrous Spatial Pyramid Pooling) para captura de contexto multi-escala sin reducir resolución, más un decoder ligero con skip connection desde el encoder. Entrenado desde cero (`encoder_weights=None`) dado que los datos SAR difieren de ImageNet. Usa cosine LR annealing. Implementado vía `segmentation-models-pytorch`.
 
 ### Configurar en YAML
 
@@ -226,7 +260,7 @@ El comando `compare` entrena y evalúa múltiples modelos en una sola ejecución
 model:
   compare:
     models_water:  ["threshold_change", "logreg", "random_forest", "xgboost", "mlp"]
-    models_flood:  ["logreg", "random_forest", "xgboost", "mlp", "unet"]
+    models_flood:  ["logreg", "random_forest", "xgboost", "mlp", "unet", "attention_unet", "deeplabv3plus"]
     random_forest:
       n_estimators: 200
       max_depth: null
@@ -241,16 +275,17 @@ model:
       batch_size: 8
       dropout: 0.2
       mc_samples: 20
-```
-
-### Ejecutar la comparación
-
-```bash
-# Requiere haber completado `preprocess` primero
-floodprob compare --config configs/valencia_example.yaml
-
-# Forzar re-entrenamiento aunque existan bundles cacheados
-floodprob compare --config configs/valencia_example.yaml --force-retrain
+    attention_unet:       # mismos hiperparámetros que unet
+      epochs: 30
+      lr: 0.001
+      batch_size: 8
+      dropout: 0.2
+      mc_samples: 20
+    deeplabv3plus:
+      encoder: "resnet34"
+      epochs: 20
+      lr: 0.0005
+      batch_size: 4
 ```
 
 ### Salidas de la comparación
@@ -258,27 +293,35 @@ floodprob compare --config configs/valencia_example.yaml --force-retrain
 ```
 outputs/<run_name>/
 ├── metadata/
-│   └── manifest_compare.json          # métricas por modelo y ventana
+│   └── manifest_compare.json            # métricas por modelo y ventana
 ├── models/
-│   └── compare_<model>_<task>.joblib  # bundles cacheados
+│   ├── compare_<model>_<task>.joblib    # bundles cacheados (sklearn)
+│   ├── unet_flood.pt                    # pesos PyTorch U-Net
+│   ├── attention_unet_flood.pt          # pesos PyTorch Attention U-Net ★
+│   └── deeplabv3plus_flood.pt           # pesos PyTorch DeepLabV3+ ★
 ├── predictions/
 │   ├── p_agua_<model>_<key>.tif
 │   ├── p_inundacion_<model>_<key>.tif
 │   └── p_inundacion_final_<model>_<key>.tif
-└── figures/                           # PNG (300 dpi) + PDF
-    ├── spatial_grid_<key>.png/.pdf    # cuadrícula espacial todos los modelos
-    ├── roc_water.png/.pdf             # curvas ROC — cabeza agua
-    ├── roc_flood.png/.pdf             # curvas ROC — cabeza flood
-    ├── pr_water.png/.pdf              # curvas Precision-Recall
-    ├── pr_flood.png/.pdf
-    ├── metrics_bar_water.png/.pdf     # barras F1, IoU, AUC
-    ├── metrics_bar_flood.png/.pdf
-    ├── calibration_water.png/.pdf     # reliability diagrams
-    ├── calibration_flood.png/.pdf
-    ├── feature_importance_water.png/.pdf  # RF + XGBoost
-    ├── feature_importance_flood.png/.pdf
-    └── error_map_<key>.png/.pdf       # solo si external_labels.flood está definido
+└── figures/                             # PNG (300 dpi) + PDF
+    ├── sar_context_<key>.png            # ★ SAR antes/después/cambio + contorno GT
+    ├── model_predictions_<key>.png      # ★ Grid ground truth + predicciones por modelo
+    ├── ensemble_analysis_<key>.png      # ★ Acuerdo, incertidumbre, mejor/peor modelo
+    ├── roc_water.png / roc_flood.png    # curvas ROC por tarea
+    ├── pr_water.png / pr_flood.png      # curvas Precision-Recall
+    ├── metrics_bar_water.png / metrics_bar_flood.png  # barras F1, IoU, AUC
+    ├── calibration_water.png / calibration_flood.png  # reliability diagrams
+    ├── feature_importance_water.png / feature_importance_flood.png
+    └── error_map_<key>.png              # solo si external_labels.flood está definido
 ```
+
+### Figuras nuevas ★
+
+| Figura | Descripción |
+|---|---|
+| `sar_context_<key>.png` | SAR antes (baseline) / después (evento) / cambio (Δ) para VV y VH. Superpone contorno rojo con el ground truth de inundación. |
+| `model_predictions_<key>.png` | Grid completo: columna ground truth + una columna por modelo. Fila superior P(agua), fila inferior P(inundación\|agua). Escala fija [0,1], contorno blanco al umbral 0.5, métricas AUC/F1/IoU en título. |
+| `ensemble_analysis_<key>.png` | 4 paneles: acuerdo entre modelos, incertidumbre (σ pixel a pixel), predicción del mejor modelo (F1 máx), predicción del peor modelo (F1 mín). |
 
 ---
 
@@ -318,11 +361,13 @@ Si no hay DEM, el pipeline continúa pero con features topográficas limitadas (
 | `crs_salida` | CRS de salida (default `EPSG:25830`) |
 | `resolution_m` | Resolución en metros. `10 m` = más detalle, mayor coste; `20 m` = más rápido |
 | `seed` | Semilla para reproducibilidad de todos los modelos |
-| `model.tile_size` | Tamaño de tile para holdout espacial y patches U-Net (default `128`) |
+| `model.tile_size` | Tamaño de tile para holdout espacial y patches U-Net/Attention U-Net/DeepLabV3+ (default `128`) |
 | `model.calibration` | Método de calibración: `isotonic` o `sigmoid` |
 | `model.ensemble_n` | Número de modelos en el ensemble (default `1`) |
 
 - El pipeline usa caché por hash en `cache/`. Si cambias los parámetros de descarga, borra `cache/` para invalidarla.
+- Los modelos PyTorch se entrenan en GPU si está disponible (`cuda`), con fallback automático a CPU.
+- `quantile(0.5)` se usa en lugar de `median(skipna=True)` para la reducción temporal del SAR, evitando un bug de `np.ma.sort` en numpy ≥ 2.0 con arrays dask.
 - Si un asset de Sentinel no es COG, rasterio puede seguir leyendo via VSI según el servidor; si falla, revisa permisos del endpoint o cambia la colección/asset.
 
 ---
@@ -368,6 +413,10 @@ Evaluación sobre ground truth real del **Copernicus Emergency Management Servic
 | XGBoost | 0.717 | **0.156** | **0.085** | 0.011 |
 | MLP | **0.750** | 0.134 | 0.072 | 0.012 |
 | U-Net | 0.689 | 0.027 | 0.014 | 0.203 |
+| Attention U-Net | — | — | — | — |
+| DeepLabV3+ | — | — | — | — |
+
+> Los resultados de Attention U-Net y DeepLabV3+ se actualizarán tras completar la evaluación.
 
 **Notas metodológicas:**
 - Las etiquetas de entrenamiento son **pseudo-etiquetas** generadas automáticamente desde cambio SAR + frecuencia histórica de agua; las etiquetas de evaluación son el ground truth externo EMSR773.

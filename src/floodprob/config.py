@@ -90,16 +90,25 @@ class UNetConfig(BaseModel):
     mc_samples: int = 20
 
 
+class DeepLabV3PlusConfig(BaseModel):
+    encoder: str = "resnet34"
+    epochs: int = 20
+    lr: float = 5e-4
+    batch_size: int = 4
+
+
 class CompareConfig(BaseModel):
     models_water: list[str] = Field(
         default_factory=lambda: ["threshold_change", "logreg", "random_forest", "xgboost", "mlp"]
     )
     models_flood: list[str] = Field(
-        default_factory=lambda: ["logreg", "random_forest", "xgboost", "mlp", "unet"]
+        default_factory=lambda: ["logreg", "random_forest", "xgboost", "mlp", "unet", "attention_unet", "deeplabv3plus"]
     )
     random_forest: RandomForestConfig = Field(default_factory=RandomForestConfig)
     mlp: MlpConfig = Field(default_factory=MlpConfig)
     unet: UNetConfig = Field(default_factory=UNetConfig)
+    attention_unet: UNetConfig = Field(default_factory=UNetConfig)
+    deeplabv3plus: DeepLabV3PlusConfig = Field(default_factory=DeepLabV3PlusConfig)
 
 
 class ModelConfig(BaseModel):

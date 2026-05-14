@@ -8,6 +8,12 @@ Public entry point:
     run_visualize_compare(cfg, results, paths, targets_meta)
 
 Individual figure functions can also be called directly.
+
+Figures generated:
+    A. sar_context_{key}.png       — SAR antes/después/cambio con ground truth contour
+    B. model_predictions_{key}.png — grid ground truth + predicciones de cada modelo
+    C. ensemble_analysis_{key}.png — acuerdo, incertidumbre, mejor/peor modelo
+    + ROC, PR, calibration, metrics bar, feature importance (sin cambios)
 """
 
 import logging
@@ -17,7 +23,6 @@ from typing import Any
 import matplotlib
 matplotlib.use("Agg")  # headless rendering
 import matplotlib.pyplot as plt
-import matplotlib.colors as mcolors
 import matplotlib.patches as mpatches
 import numpy as np
 import xarray as xr
@@ -36,12 +41,12 @@ _MODEL_COLORS = {
     "xgboost":          "#FF9800",
     "mlp":              "#9C27B0",
     "unet":             "#F44336",
+    "attention_unet":   "#E91E63",
+    "deeplabv3plus":    "#00BCD4",
 }
 _DEFAULT_COLOR = "#888888"
 
-_PROB_CMAP   = "RdYlBu_r"   # blue = high water, red = dry
-_DIFF_CMAP   = "bwr"        # diverging, centred at 0
-_ERROR_CMAP  = "hot_r"      # for |pred − label| maps
+_ERROR_CMAP = "hot_r"
 
 
 # ── Save helper ───────────────────────────────────────────────────────────────
@@ -79,7 +84,7 @@ def _add_scale_bar(
 ) -> None:
     """Draw a simple scale bar. Assumes the DataArray's CRS is metric."""
     try:
-        res = float(abs(da.x[1] - da.x[0]))  # pixel size in map units
+        res = float(abs(da.x[1] - da.x[0]))
         if res == 0:
             return
         n_pixels = length_m / res
@@ -96,126 +101,525 @@ def _add_scale_bar(
         pass
 
 
-# ── A: Spatial grid ──────────────────────────────────────────────────────────
+# ── Shared raster loader ──────────────────────────────────────────────────────
 
-def plot_spatial_grid(
-    results: dict[str, Any],
+def _load_raster(path: str | None) -> np.ndarray | None:
+    """Load a GeoTIFF as a 2-D float32 array. Returns None on any failure."""
+    import rioxarray as rxr
+    if not path or not Path(path).exists():
+        return None
+    try:
+        return rxr.open_rasterio(path, masked=True).squeeze(drop=True).values.astype(np.float32)
+    except Exception:
+        LOGGER.error("Failed to load raster: %s", path)
+        return None
+
+
+def _get_per_window_metric(results: dict, model: str, task: str, key: str, metric: str) -> float:
+    per_w = results[model].get(task, {}).get("per_window", [])
+    w = next((wp for wp in per_w if wp["key"] == key), None)
+    if w and w.get("metrics"):
+        return float(w["metrics"].get(metric, float("nan")))
+    return float("nan")
+
+
+# ── A: SAR context (antes / después / cambio) ────────────────────────────────
+
+def plot_sar_context(
+    target: dict,
     key: str,
-    cfg: AppConfig,
     figures_dir: Path,
 ) -> None:
-    """Rows: p_agua / p_inundacion / diff_vs_best.  Columns: models."""
+    """Figura A: VV y VH antes/después del evento + mapa de cambio.
 
-    water_models = [m for m in results if results[m].get("water")]
-    flood_models = [m for m in results if results[m].get("flood")]
-    all_models   = list(dict.fromkeys(water_models + flood_models))
-    if not all_models:
+    Reconstruye el baseline como vv_db_base = vv_db - delta_vv (idéntico
+    a lo que se calculó en preprocess, no se guarda en features_*.nc).
+    Superpone el contorno de flood_label en rojo si está disponible.
+    """
+    features_path = target.get("features_path")
+    labels_path = target.get("labels_path")
+
+    if not features_path or not Path(features_path).exists():
+        LOGGER.error("plot_sar_context: features_path no encontrado para key=%s", key)
         return
 
-    # ── Load rasters for this key ──────────────────────────────────────────
-    import rioxarray as rxr
+    feat_ds = xr.open_dataset(Path(features_path))
 
-    def _load(path: str | None) -> xr.DataArray | None:
-        if not path or not Path(path).exists():
-            return None
+    required = {"vv_db", "delta_vv"}
+    if not required.issubset(set(feat_ds.data_vars)):
+        LOGGER.error("plot_sar_context: faltan variables SAR en features para key=%s", key)
+        return
+
+    vv_after  = feat_ds["vv_db"].values.astype(np.float32)
+    delta_vv  = feat_ds["delta_vv"].values.astype(np.float32)
+    vv_before = vv_after - delta_vv
+
+    has_vh = "vh_db" in feat_ds and "delta_vh" in feat_ds
+    if has_vh:
+        vh_after  = feat_ds["vh_db"].values.astype(np.float32)
+        delta_vh  = feat_ds["delta_vh"].values.astype(np.float32)
+        vh_before = vh_after - delta_vh
+
+    # Load flood label for contour overlay
+    flood_label: np.ndarray | None = None
+    if labels_path and Path(labels_path).exists():
         try:
-            return rxr.open_rasterio(path, masked=True).squeeze(drop=True)
-        except Exception:  # noqa: BLE001
-            return None
+            lab_ds = xr.open_dataset(Path(labels_path))
+            if "flood_label" in lab_ds:
+                flood_label = lab_ds["flood_label"].values.astype(np.float32)
+        except Exception:
+            LOGGER.warning("No se pudo cargar flood_label para sar_context key=%s", key)
 
-    water_maps: dict[str, xr.DataArray | None] = {}
-    flood_maps: dict[str, xr.DataArray | None] = {}
-    for m in all_models:
-        # water
-        pw_path = next(
-            (wp["p_agua"] for wp in results[m].get("water", {}).get("per_window", []) if wp["key"] == key),
-            None,
-        )
-        water_maps[m] = _load(pw_path)
-        # flood (dado agua)
-        pf_path = next(
-            (wp["p_inundacion_dado_agua"] for wp in results[m].get("flood", {}).get("per_window", []) if wp["key"] == key),
-            None,
-        )
-        flood_maps[m] = _load(pf_path)
+    n_rows = 2 if has_vh else 1
+    fig, axes = plt.subplots(n_rows, 3, figsize=(13, 4.8 * n_rows), squeeze=False)
+    fig.suptitle(f"Contexto SAR — ventana {key}", fontsize=13, fontweight="bold")
 
-    # ── Best water model (highest AUC-ROC for this key) ───────────────────
-    best_water_auc = -1.0
-    best_water_da: xr.DataArray | None = None
-    for m, da in water_maps.items():
-        if da is None:
-            continue
-        per_w = results[m].get("water", {}).get("per_window", [])
-        auc = next((wp["metrics"].get("auc_roc", -1) for wp in per_w if wp["key"] == key), -1)
-        if auc > best_water_auc:
-            best_water_auc = auc
-            best_water_da = da
+    for j, title in enumerate(["Antes (baseline)", "Después (evento)", "Cambio (Δ)"]):
+        axes[0, j].set_title(title, fontsize=10, fontweight="bold")
 
-    n_cols = len(all_models)
-    n_rows = 3  # p_agua / p_inundacion / diff
-    fig, axes = plt.subplots(
-        n_rows, n_cols,
-        figsize=(3.5 * n_cols, 3.2 * n_rows),
-        squeeze=False,
-    )
-    fig.suptitle(f"Model comparison — window {key}", fontsize=12, y=1.01)
+    def _pct_clip(arr: np.ndarray) -> tuple[float, float]:
+        finite = arr[np.isfinite(arr)]
+        if len(finite) == 0:
+            return 0.0, 1.0
+        return float(np.percentile(finite, 2)), float(np.percentile(finite, 98))
 
-    row_labels = ["$P(agua)$", "$P(inund.|agua)$", "$\\Delta$ vs. best water"]
-    for ri, rlabel in enumerate(row_labels):
-        axes[ri, 0].set_ylabel(rlabel, fontsize=9)
-
-    for ci, m in enumerate(all_models):
-        axes[0, ci].set_title(m, fontsize=9, fontweight="bold")
-
-        # Row 0: p_agua
-        da_w = water_maps[m]
-        ax = axes[0, ci]
-        if da_w is not None:
-            im = ax.imshow(da_w.values, cmap=_PROB_CMAP, vmin=0, vmax=1, origin="upper")
-            fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-            _add_north_arrow(ax)
-            _add_scale_bar(ax, da_w)
-        else:
-            ax.text(0.5, 0.5, "N/A", ha="center", va="center", transform=ax.transAxes)
+    def _plot_gray(ax: plt.Axes, arr: np.ndarray, ylabel: str) -> None:
+        vmin, vmax = _pct_clip(arr)
+        im = ax.imshow(arr, cmap="gray", vmin=vmin, vmax=vmax, origin="upper")
+        ax.set_ylabel(ylabel, fontsize=9)
+        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label="dB")
         ax.set_xticks([]); ax.set_yticks([])
 
-        # Row 1: p_inundacion
-        da_f = flood_maps[m]
-        ax = axes[1, ci]
-        if da_f is not None:
-            im = ax.imshow(da_f.values, cmap=_PROB_CMAP, vmin=0, vmax=1, origin="upper")
-            fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-            _add_north_arrow(ax)
-            _add_scale_bar(ax, da_f)
-        else:
-            ax.text(0.5, 0.5, "N/A", ha="center", va="center", transform=ax.transAxes)
+    def _plot_diverging(ax: plt.Axes, arr: np.ndarray, ylabel: str) -> None:
+        finite = arr[np.isfinite(arr)]
+        vabs = max(float(np.percentile(np.abs(finite), 99)), 0.1) if len(finite) else 1.0
+        im = ax.imshow(arr, cmap="RdBu_r", vmin=-vabs, vmax=vabs, origin="upper")
+        ax.set_ylabel(ylabel, fontsize=9)
+        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label="Δ dB")
         ax.set_xticks([]); ax.set_yticks([])
 
-        # Row 2: difference vs best water
-        ax = axes[2, ci]
-        if da_w is not None and best_water_da is not None and m != "threshold_change":
-            try:
-                ref = best_water_da.rio.reproject_match(da_w) if da_w.shape != best_water_da.shape else best_water_da
-                diff = da_w.values - ref.values
-                vabs = max(float(np.nanpercentile(np.abs(diff), 98)), 0.01)
-                im = ax.imshow(diff, cmap=_DIFF_CMAP, vmin=-vabs, vmax=vabs, origin="upper")
-                fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-            except Exception:  # noqa: BLE001
-                ax.text(0.5, 0.5, "Error", ha="center", va="center", transform=ax.transAxes)
-        else:
-            ax.text(0.5, 0.5, "—", ha="center", va="center", transform=ax.transAxes)
-        ax.set_xticks([]); ax.set_yticks([])
+    def _add_flood_contour(ax: plt.Axes) -> None:
+        if flood_label is None:
+            return
+        valid = (flood_label >= 0) & np.isfinite(flood_label)
+        if valid.any() and (flood_label[valid] > 0).any():
+            safe = np.where(flood_label >= 0, flood_label, 0.0)
+            ax.contour(safe, levels=[0.5], colors=["red"], linewidths=1.5)
+
+    # Row 0: VV
+    _plot_gray(axes[0, 0], vv_before, "VV (dB)")
+    _plot_gray(axes[0, 1], vv_after,  "VV (dB)")
+    _plot_diverging(axes[0, 2], delta_vv, "Δ VV (dB)")
+    for j in range(3):
+        _add_flood_contour(axes[0, j])
+
+    # Row 1: VH
+    if has_vh:
+        _plot_gray(axes[1, 0], vh_before, "VH (dB)")
+        _plot_gray(axes[1, 1], vh_after,  "VH (dB)")
+        _plot_diverging(axes[1, 2], delta_vh, "Δ VH (dB)")
+        for j in range(3):
+            _add_flood_contour(axes[1, j])
+
+    # North arrow + scale bar (using xarray DataArray for pixel size)
+    try:
+        da_ref = feat_ds["vv_db"]
+        for i in range(n_rows):
+            _add_north_arrow(axes[i, 0])
+        _add_scale_bar(axes[0, 0], da_ref)
+    except Exception:  # noqa: BLE001
+        pass
 
     fig.tight_layout()
-    _save(fig, figures_dir / f"spatial_grid_{key}.png")
+    _save(fig, figures_dir / f"sar_context_{key}.png")
 
 
-# ── B1: ROC curves ────────────────────────────────────────────────────────────
+# ── B: Model predictions grid ────────────────────────────────────────────────
+
+def plot_model_predictions(
+    results: dict[str, Any],
+    target: dict,
+    key: str,
+    figures_dir: Path,
+) -> None:
+    """Figura B: Ground truth + predicciones de todos los modelos.
+
+    Fila 0: P(agua) — un panel por water model, escala fija [0,1], Blues.
+    Fila 1: P(inundación|agua) — un panel por flood model, escala fija [0,1], Reds.
+    Columna 0 de cada fila: ground truth correspondiente.
+    Contorno blanco al umbral 0.5 sobre cada predicción.
+    Métricas AUC / F1 / IoU en el título de cada panel.
+    """
+    import rioxarray as rxr  # noqa: F401 (ensures plugin registered)
+
+    water_models = [m for m in results if results[m].get("water", {}).get("per_window")]
+    flood_models = [m for m in results if results[m].get("flood", {}).get("per_window")]
+
+    if not water_models and not flood_models:
+        LOGGER.warning("plot_model_predictions: sin modelos con datos per_window para key=%s", key)
+        return
+
+    n_water = len(water_models)
+    n_flood = len(flood_models)
+    n_cols = 1 + max(n_water, n_flood)
+
+    # Load labels
+    water_label: np.ndarray | None = None
+    flood_label: np.ndarray | None = None
+    labels_path = target.get("labels_path")
+    if labels_path and Path(labels_path).exists():
+        try:
+            lab_ds = xr.open_dataset(Path(labels_path))
+            if "water_label" in lab_ds:
+                water_label = lab_ds["water_label"].values.astype(np.float32)
+            if "flood_label" in lab_ds:
+                flood_label = lab_ds["flood_label"].values.astype(np.float32)
+        except Exception:
+            LOGGER.error("No se pudo cargar labels para key=%s", key)
+
+    fig, axes = plt.subplots(2, n_cols, figsize=(3.8 * n_cols, 7.5), squeeze=False)
+    fig.suptitle(f"Predicciones por modelo — ventana {key}", fontsize=13, fontweight="bold")
+
+    axes[0, 0].set_ylabel("P(agua)", fontsize=10, fontweight="bold")
+    axes[1, 0].set_ylabel("P(inund.|agua)", fontsize=10, fontweight="bold")
+
+    # ── Column 0: ground truth ────────────────────────────────────────────────
+    for row, label_arr, cmap, row_label in [
+        (0, water_label, "Blues", "Etiqueta agua"),
+        (1, flood_label, "Reds",  "Etiqueta inund."),
+    ]:
+        ax = axes[row, 0]
+        ax.set_title(row_label, fontsize=9, fontweight="bold")
+        if label_arr is not None:
+            disp = np.where(label_arr >= 0, label_arr, np.nan)
+            ax.imshow(disp, cmap=cmap, vmin=0, vmax=1, origin="upper")
+        else:
+            ax.text(0.5, 0.5, "Sin etiqueta", ha="center", va="center",
+                    transform=ax.transAxes, fontsize=9, color="gray")
+        ax.set_xticks([]); ax.set_yticks([])
+
+    # ── Row 0: water model predictions ───────────────────────────────────────
+    water_mappable = None
+    for ci, m in enumerate(water_models):
+        pw_path = next(
+            (wp["p_agua"] for wp in results[m]["water"]["per_window"] if wp["key"] == key),
+            None,
+        )
+        arr = _load_raster(pw_path)
+        auc = _get_per_window_metric(results, m, "water", key, "auc_roc")
+
+        ax = axes[0, ci + 1]
+        title = m
+        if np.isfinite(auc):
+            title += f"\nAUC={auc:.3f}"
+        ax.set_title(title, fontsize=8, fontweight="bold", color=_model_color(m))
+
+        if arr is not None:
+            arr_c = np.clip(arr, 0, 1)
+            im = ax.imshow(arr_c, cmap="Blues", vmin=0, vmax=1, origin="upper")
+            water_mappable = im
+            ax.contour(arr_c, levels=[0.5], colors=["white"], linewidths=1.2)
+            if flood_label is not None:
+                safe = np.where(flood_label >= 0, flood_label, 0.0)
+                ax.contour(safe, levels=[0.5], colors=["red"], linewidths=1.0,
+                           linestyles=["--"])
+        else:
+            ax.text(0.5, 0.5, "N/A", ha="center", va="center",
+                    transform=ax.transAxes, color="gray")
+        ax.set_xticks([]); ax.set_yticks([])
+
+    for ci in range(n_water, n_cols - 1):
+        axes[0, ci + 1].set_visible(False)
+
+    # ── Row 1: flood model predictions ───────────────────────────────────────
+    flood_mappable = None
+    for ci, m in enumerate(flood_models):
+        pf_path = next(
+            (wp["p_inundacion_dado_agua"]
+             for wp in results[m]["flood"]["per_window"] if wp["key"] == key),
+            None,
+        )
+        arr = _load_raster(pf_path)
+        f1  = _get_per_window_metric(results, m, "flood", key, "f1")
+        iou = _get_per_window_metric(results, m, "flood", key, "iou")
+
+        ax = axes[1, ci + 1]
+        parts = [m]
+        if np.isfinite(f1):
+            parts.append(f"F1={f1:.3f}")
+        if np.isfinite(iou):
+            parts.append(f"IoU={iou:.3f}")
+        ax.set_title("\n".join(parts[:1]) + ("\n" + "  ".join(parts[1:]) if len(parts) > 1 else ""),
+                     fontsize=8, fontweight="bold", color=_model_color(m))
+
+        if arr is not None:
+            arr_c = np.clip(arr, 0, 1)
+            im = ax.imshow(arr_c, cmap="Reds", vmin=0, vmax=1, origin="upper")
+            flood_mappable = im
+            ax.contour(arr_c, levels=[0.5], colors=["white"], linewidths=1.2)
+            if flood_label is not None:
+                safe = np.where(flood_label >= 0, flood_label, 0.0)
+                ax.contour(safe, levels=[0.5], colors=["black"], linewidths=1.0,
+                           linestyles=["--"])
+        else:
+            ax.text(0.5, 0.5, "N/A", ha="center", va="center",
+                    transform=ax.transAxes, color="gray")
+        ax.set_xticks([]); ax.set_yticks([])
+
+    for ci in range(n_flood, n_cols - 1):
+        axes[1, ci + 1].set_visible(False)
+
+    # ── Shared colorbars per row ──────────────────────────────────────────────
+    if water_mappable is not None:
+        fig.colorbar(water_mappable, ax=axes[0, :].tolist(),
+                     shrink=0.55, pad=0.01, label="P(agua)  [0 – 1]")
+    if flood_mappable is not None:
+        fig.colorbar(flood_mappable, ax=axes[1, :].tolist(),
+                     shrink=0.55, pad=0.01, label="P(inund.|agua)  [0 – 1]")
+
+    # North arrow + scale bar on first real data column
+    try:
+        da_ref = xr.open_dataset(Path(target["features_path"]))["vv_db"]
+        _add_north_arrow(axes[0, 1])
+        _add_scale_bar(axes[0, 1], da_ref)
+    except Exception:  # noqa: BLE001
+        pass
+
+    # Legend for contours
+    legend_handles = [
+        mpatches.Patch(color="white", label="Umbral 0.5 (modelo)"),
+        mpatches.Patch(color="red",   label="GT inundación"),
+    ]
+    fig.legend(handles=legend_handles, loc="lower center", ncol=2,
+               fontsize=8, framealpha=0.8, bbox_to_anchor=(0.5, -0.02))
+
+    fig.tight_layout()
+    _save(fig, figures_dir / f"model_predictions_{key}.png")
+
+
+# ── C: Ensemble analysis ──────────────────────────────────────────────────────
+
+def plot_ensemble_analysis(
+    results: dict[str, Any],
+    target: dict,
+    key: str,
+    figures_dir: Path,
+) -> None:
+    """Figura C: Acuerdo entre modelos, incertidumbre, mejor y peor modelo.
+
+    Panel 1 — Agreement: fracción de flood models con P > 0.5.
+    Panel 2 — Uncertainty: desviación típica pixel a pixel entre modelos.
+    Panel 3 — Mejor modelo (mayor F1).
+    Panel 4 — Peor modelo (menor F1).
+    Contorno blanco = ground truth flood si disponible.
+    """
+    import rioxarray as rxr  # noqa: F401
+
+    flood_models = [m for m in results if results[m].get("flood", {}).get("per_window")]
+    if len(flood_models) < 2:
+        LOGGER.info(
+            "plot_ensemble_analysis: menos de 2 flood models para key=%s, omitiendo", key
+        )
+        return
+
+    # Load flood label for contour
+    flood_label: np.ndarray | None = None
+    labels_path = target.get("labels_path")
+    if labels_path and Path(labels_path).exists():
+        try:
+            lab_ds = xr.open_dataset(Path(labels_path))
+            if "flood_label" in lab_ds:
+                flood_label = lab_ds["flood_label"].values.astype(np.float32)
+        except Exception:
+            pass
+
+    # Load all flood predictions for this key
+    pred_arrays: dict[str, np.ndarray] = {}
+    for m in flood_models:
+        pf_path = next(
+            (wp["p_inundacion_dado_agua"]
+             for wp in results[m]["flood"]["per_window"] if wp["key"] == key),
+            None,
+        )
+        arr = _load_raster(pf_path)
+        if arr is not None:
+            pred_arrays[m] = np.clip(arr, 0, 1)
+
+    if len(pred_arrays) < 2:
+        LOGGER.warning(
+            "plot_ensemble_analysis: no se cargaron suficientes rasters para key=%s", key
+        )
+        return
+
+    stack     = np.stack(list(pred_arrays.values()), axis=0)  # (N, H, W)
+    agreement = (stack > 0.5).mean(axis=0).astype(np.float32)
+    uncertainty = stack.std(axis=0).astype(np.float32)
+
+    # Rank models by F1
+    f1_scores = {
+        m: _get_per_window_metric(results, m, "flood", key, "f1")
+        for m in pred_arrays
+    }
+    valid_f1 = {m: v for m, v in f1_scores.items() if np.isfinite(v)}
+    if valid_f1:
+        best_model  = max(valid_f1, key=lambda m: valid_f1[m])
+        worst_model = min(valid_f1, key=lambda m: valid_f1[m])
+    else:
+        models_list = list(pred_arrays.keys())
+        best_model, worst_model = models_list[0], models_list[-1]
+
+    fig, axes = plt.subplots(1, 4, figsize=(19, 5))
+    fig.suptitle(f"Análisis de ensemble — ventana {key}", fontsize=13, fontweight="bold")
+
+    def _add_gt_contour(ax: plt.Axes) -> None:
+        if flood_label is None:
+            return
+        valid = (flood_label >= 0) & np.isfinite(flood_label)
+        if valid.any() and (flood_label[valid] > 0).any():
+            safe = np.where(flood_label >= 0, flood_label, 0.0)
+            ax.contour(safe, levels=[0.5], colors=["white"], linewidths=2.0)
+
+    # Panel 1: Agreement
+    ax = axes[0]
+    im = ax.imshow(agreement, cmap="YlOrRd", vmin=0, vmax=1, origin="upper")
+    ax.set_title(
+        f"Acuerdo entre modelos\n({len(pred_arrays)} flood models)", fontsize=10
+    )
+    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label="Fracción modelos > 0.5")
+    _add_gt_contour(ax)
+    _add_north_arrow(ax)
+    ax.set_xticks([]); ax.set_yticks([])
+
+    # Panel 2: Uncertainty
+    ax = axes[1]
+    im = ax.imshow(uncertainty, cmap="viridis", vmin=0, vmax=0.5, origin="upper")
+    ax.set_title("Incertidumbre\n(σ entre modelos)", fontsize=10)
+    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label="Desv. típica")
+    _add_gt_contour(ax)
+    ax.set_xticks([]); ax.set_yticks([])
+
+    # Panel 3: Best model
+    ax = axes[2]
+    best_f1 = f1_scores.get(best_model, float("nan"))
+    title3 = f"Mejor: {best_model}"
+    if np.isfinite(best_f1):
+        title3 += f"\nF1={best_f1:.3f}"
+    im = ax.imshow(pred_arrays[best_model], cmap="Reds", vmin=0, vmax=1, origin="upper")
+    ax.set_title(title3, fontsize=10, color=_model_color(best_model), fontweight="bold")
+    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label="P(inund.|agua)")
+    ax.contour(pred_arrays[best_model], levels=[0.5], colors=["white"], linewidths=1.2)
+    _add_gt_contour(ax)
+    ax.set_xticks([]); ax.set_yticks([])
+
+    # Panel 4: Worst model
+    ax = axes[3]
+    worst_f1 = f1_scores.get(worst_model, float("nan"))
+    title4 = f"Peor: {worst_model}"
+    if np.isfinite(worst_f1):
+        title4 += f"\nF1={worst_f1:.3f}"
+    im = ax.imshow(pred_arrays[worst_model], cmap="Reds", vmin=0, vmax=1, origin="upper")
+    ax.set_title(title4, fontsize=10, color=_model_color(worst_model), fontweight="bold")
+    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label="P(inund.|agua)")
+    ax.contour(pred_arrays[worst_model], levels=[0.5], colors=["white"], linewidths=1.2)
+    _add_gt_contour(ax)
+    ax.set_xticks([]); ax.set_yticks([])
+
+    # Legend: white contour = GT
+    if flood_label is not None:
+        fig.legend(
+            handles=[mpatches.Patch(color="white", label="Ground truth (contorno)")],
+            loc="lower center", fontsize=8, framealpha=0.8, bbox_to_anchor=(0.5, -0.03),
+        )
+
+    fig.tight_layout()
+    _save(fig, figures_dir / f"ensemble_analysis_{key}.png")
+
+
+# ── External label loader (raster o vector) ───────────────────────────────────
+
+def _load_external_label(
+    ext_path: Path,
+    results: dict[str, Any],
+) -> np.ndarray | None:
+    """Carga una etiqueta externa como array binario (H, W) uint8.
+
+    Soporta:
+    - GeoTIFF / raster: lee directamente con rioxarray.
+    - GeoJSON / Shapefile (vector): rasteriza sobre la cuadrícula de la primera
+      predicción disponible en results, usando geopandas + rasterio.features.
+    """
+    suffix = ext_path.suffix.lower()
+    vector_exts = {".geojson", ".json", ".gpkg", ".shp"}
+
+    if suffix not in vector_exts:
+        # Raster path
+        import rioxarray as rxr
+        da = rxr.open_rasterio(str(ext_path), masked=True).squeeze(drop=True)
+        return (da.values > 0).astype(np.uint8)
+
+    # ── Vector path: rasterizar sobre la cuadrícula de referencia ────────────
+    import geopandas as gpd
+    import rasterio
+    from rasterio.features import rasterize as rio_rasterize
+
+    # Find a reference prediction raster for shape/transform/CRS
+    ref_raster: str | None = None
+    for m in results:
+        for task in ("water", "flood"):
+            for wp in results[m].get(task, {}).get("per_window", []):
+                candidate = wp.get("p_agua") or wp.get("p_inundacion_dado_agua")
+                if candidate and Path(candidate).exists():
+                    ref_raster = candidate
+                    break
+            if ref_raster:
+                break
+        if ref_raster:
+            break
+
+    if ref_raster is None:
+        LOGGER.error("_load_external_label: no se encontró raster de referencia para rasterizar el vector")
+        return None
+
+    gdf = gpd.read_file(ext_path)
+    with rasterio.open(ref_raster) as src:
+        ref_crs   = src.crs
+        ref_transform = src.transform
+        ref_shape = (src.height, src.width)
+
+    if gdf.crs is None:
+        LOGGER.warning("_load_external_label: GeoJSON sin CRS, asumiendo EPSG:4326")
+        gdf = gdf.set_crs("EPSG:4326")
+    gdf = gdf.to_crs(ref_crs)
+
+    valid_geoms = [
+        (geom, 1)
+        for geom in gdf.geometry
+        if geom is not None and not geom.is_empty
+    ]
+    if not valid_geoms:
+        LOGGER.warning("_load_external_label: el vector no contiene geometrías válidas")
+        return np.zeros(ref_shape, dtype=np.uint8)
+
+    arr = rio_rasterize(
+        valid_geoms,
+        out_shape=ref_shape,
+        transform=ref_transform,
+        fill=0,
+        dtype=np.uint8,
+    )
+    LOGGER.info(
+        "_load_external_label: rasterizado %s → %d píxeles positivos de %d totales",
+        ext_path.name, int(arr.sum()), arr.size,
+    )
+    return arr
+
+
+# ── Curve data collector ──────────────────────────────────────────────────────
 
 def _collect_labels_probs(
     results: dict[str, Any],
-    task: str,  # "water" or "flood"
-    label_key: str,  # "p_agua" or "p_inundacion_dado_agua"
+    task: str,
+    label_key: str,
     label_arr_map: dict[str, np.ndarray],
 ) -> dict[str, tuple[np.ndarray, np.ndarray]]:
     """Returns {model_name: (y_true_concat, y_prob_concat)} across all windows."""
@@ -228,17 +632,19 @@ def _collect_labels_probs(
             continue
         ys, ps = [], []
         for wp in per_window:
-            key = wp["key"]
+            k = wp["key"]
             path = wp.get(label_key)
             if not path or not Path(path).exists():
                 continue
-            if key not in label_arr_map:
+            if k not in label_arr_map:
                 continue
             try:
-                p_arr = rxr.open_rasterio(path, masked=True).squeeze(drop=True).values.astype(np.float32)
+                p_arr = rxr.open_rasterio(path, masked=True).squeeze(drop=True).values.astype(
+                    np.float32
+                )
             except Exception:  # noqa: BLE001
                 continue
-            y_arr = label_arr_map[key]
+            y_arr = label_arr_map[k]
             mask = (y_arr >= 0) & np.isfinite(p_arr)
             if mask.sum() == 0:
                 continue
@@ -248,6 +654,8 @@ def _collect_labels_probs(
             out[m] = (np.concatenate(ys), np.concatenate(ps))
     return out
 
+
+# ── ROC curves ────────────────────────────────────────────────────────────────
 
 def plot_roc_curves(
     model_data: dict[str, tuple[np.ndarray, np.ndarray]],
@@ -266,6 +674,8 @@ def plot_roc_curves(
     _save(fig, figures_dir / f"{stem}.png")
 
 
+# ── PR curves ─────────────────────────────────────────────────────────────────
+
 def plot_pr_curves(
     model_data: dict[str, tuple[np.ndarray, np.ndarray]],
     title: str,
@@ -283,7 +693,7 @@ def plot_pr_curves(
     _save(fig, figures_dir / f"{stem}.png")
 
 
-# ── B2: Metric bar chart ──────────────────────────────────────────────────────
+# ── Metric bar chart ──────────────────────────────────────────────────────────
 
 def plot_metrics_bar(
     results: dict[str, Any],
@@ -309,7 +719,6 @@ def plot_metrics_bar(
             vals, width * 0.9,
             label=m, color=_model_color(m), edgecolor="white", linewidth=0.5,
         )
-        # Value labels
         for bar, v in zip(bars, vals):
             if not np.isnan(v):
                 ax.text(
@@ -325,7 +734,7 @@ def plot_metrics_bar(
     _save(fig, figures_dir / f"{stem}.png")
 
 
-# ── B3: Calibration (reliability diagram) ─────────────────────────────────────
+# ── Calibration (reliability diagram) ─────────────────────────────────────────
 
 def plot_calibration(
     model_data: dict[str, tuple[np.ndarray, np.ndarray]],
@@ -334,18 +743,18 @@ def plot_calibration(
     stem: str,
 ) -> None:
     fig, ax = plt.subplots(figsize=(6, 5))
-    ax.plot([0, 1], [0, 1], "k--", lw=0.8, label="Perfect calibration")
+    ax.plot([0, 1], [0, 1], "k--", lw=0.8, label="Calibración perfecta")
     for m, (y, p) in model_data.items():
         prob_true, prob_pred = get_calibration_curve(y, p, n_bins=10)
         ax.plot(prob_pred, prob_true, marker="o", ms=4, color=_model_color(m), lw=1.5, label=m)
-    ax.set_xlabel("Predicted probability"); ax.set_ylabel("Observed frequency")
+    ax.set_xlabel("Probabilidad predicha"); ax.set_ylabel("Frecuencia observada")
     ax.set_xlim(0, 1); ax.set_ylim(0, 1)
     ax.set_title(title); ax.legend(fontsize=8); ax.grid(alpha=0.3)
     fig.tight_layout()
     _save(fig, figures_dir / f"{stem}.png")
 
 
-# ── D: Feature importance ─────────────────────────────────────────────────────
+# ── Feature importance ─────────────────────────────────────────────────────────
 
 def plot_feature_importance(
     results: dict[str, Any],
@@ -380,12 +789,12 @@ def plot_feature_importance(
     _save(fig, figures_dir / f"{stem}.png")
 
 
-# ── C: Error maps (with external labels) ──────────────────────────────────────
+# ── Error maps (with external labels) ──────────────────────────────────────────
 
 def plot_error_maps(
     results: dict[str, Any],
     key: str,
-    ext_label_arr: np.ndarray,  # (H, W) binary
+    ext_label_arr: np.ndarray,
     task: str,
     label_path_key: str,
     figures_dir: Path,
@@ -403,16 +812,19 @@ def plot_error_maps(
         path  = next((wp.get(label_path_key) for wp in per_w if wp["key"] == key), None)
         if not path or not Path(path).exists():
             for ri in range(2):
-                axes[ri, ci].text(0.5, 0.5, "N/A", ha="center", va="center", transform=axes[ri, ci].transAxes)
+                axes[ri, ci].text(0.5, 0.5, "N/A", ha="center", va="center",
+                                  transform=axes[ri, ci].transAxes)
             continue
         try:
-            p_arr = rxr.open_rasterio(path, masked=True).squeeze(drop=True).values.astype(np.float32)
+            p_arr = rxr.open_rasterio(path, masked=True).squeeze(drop=True).values.astype(
+                np.float32
+            )
         except Exception:  # noqa: BLE001
+            LOGGER.error("Error loading raster for error_maps: %s", path)
             continue
         p_arr = np.clip(p_arr, 0, 1)
         ext = ext_label_arr.astype(np.float32)
 
-        # Absolute error
         ax = axes[0, ci]
         abs_err = np.abs(p_arr - ext)
         im = ax.imshow(abs_err, cmap=_ERROR_CMAP, vmin=0, vmax=1, origin="upper")
@@ -421,16 +833,15 @@ def plot_error_maps(
         if ci == 0:
             ax.set_ylabel("|pred − label|", fontsize=9)
 
-        # TP/FP/FN colour map (at threshold 0.5)
         ax = axes[1, ci]
         y_hat = (p_arr >= 0.5).astype(np.uint8)
         rgb = np.zeros((*ext.shape, 3), dtype=np.uint8)
         tp = (y_hat == 1) & (ext == 1)
         fp = (y_hat == 1) & (ext == 0)
         fn = (y_hat == 0) & (ext == 1)
-        rgb[tp] = [0, 200, 0]   # green = TP
-        rgb[fp] = [255, 80, 0]  # orange = FP
-        rgb[fn] = [30, 30, 255] # blue = FN
+        rgb[tp] = [0, 200, 0]
+        rgb[fp] = [255, 80, 0]
+        rgb[fn] = [30, 30, 255]
         ax.imshow(rgb, origin="upper")
         patches = [
             mpatches.Patch(color=np.array([0, 200, 0]) / 255, label="TP"),
@@ -457,8 +868,7 @@ def run_visualize_compare(
     figures_dir = paths["run_dir"] / "figures"
     figures_dir.mkdir(parents=True, exist_ok=True)
 
-    # Collect per-key label arrays for curve plots
-    import xarray as xr
+    # Helper to load label arrays for curve plots
     def _labels_for(target: dict, var: str) -> np.ndarray:
         try:
             ds = xr.open_dataset(Path(target["labels_path"]))
@@ -466,98 +876,120 @@ def run_visualize_compare(
         except Exception:  # noqa: BLE001
             return np.array([], dtype=np.int16)
 
-    water_label_map  = {t["key"]: _labels_for(t, "water_label")  for t in targets_meta}
-    flood_label_map  = {t["key"]: _labels_for(t, "flood_label")  for t in targets_meta}
+    water_label_map = {t["key"]: _labels_for(t, "water_label") for t in targets_meta}
+    flood_label_map = {t["key"]: _labels_for(t, "flood_label") for t in targets_meta}
 
-    # ── A: Spatial grids per window ──────────────────────────────────────────
+    # ── A: SAR context (antes / después / cambio) ─────────────────────────────
     for target in targets_meta:
         try:
-            plot_spatial_grid(results, target["key"], cfg, figures_dir)
-        except Exception as exc:  # noqa: BLE001
-            LOGGER.warning("Spatial grid key=%s failed: %s", target["key"], exc)
+            plot_sar_context(target, target["key"], figures_dir)
+        except Exception:
+            LOGGER.exception("plot_sar_context falló para key=%s", target["key"])
 
-    # ── Collect concatenated labels/probs for curve plots ──────────────────
-    water_model_data = _collect_labels_probs(results, "water", "p_agua",                  water_label_map)
-    flood_model_data = _collect_labels_probs(results, "flood", "p_inundacion_dado_agua",  flood_label_map)
+    # ── B: Model predictions grid ─────────────────────────────────────────────
+    for target in targets_meta:
+        try:
+            plot_model_predictions(results, target, target["key"], figures_dir)
+        except Exception:
+            LOGGER.exception("plot_model_predictions falló para key=%s", target["key"])
 
-    # ── B1: ROC curves ────────────────────────────────────────────────────────
+    # ── C: Ensemble analysis ──────────────────────────────────────────────────
+    for target in targets_meta:
+        try:
+            plot_ensemble_analysis(results, target, target["key"], figures_dir)
+        except Exception:
+            LOGGER.exception("plot_ensemble_analysis falló para key=%s", target["key"])
+
+    # ── Collect concatenated labels/probs for curve plots ─────────────────────
+    water_model_data = _collect_labels_probs(
+        results, "water", "p_agua", water_label_map
+    )
+    flood_model_data = _collect_labels_probs(
+        results, "flood", "p_inundacion_dado_agua", flood_label_map
+    )
+
+    # ── ROC curves ────────────────────────────────────────────────────────────
     if water_model_data:
         try:
             plot_roc_curves(water_model_data, "ROC — Water model", figures_dir, "roc_water")
-        except Exception as exc:  # noqa: BLE001
-            LOGGER.warning("ROC water failed: %s", exc)
+        except Exception:
+            LOGGER.exception("ROC water failed")
     if flood_model_data:
         try:
             plot_roc_curves(flood_model_data, "ROC — Flood model", figures_dir, "roc_flood")
-        except Exception as exc:  # noqa: BLE001
-            LOGGER.warning("ROC flood failed: %s", exc)
+        except Exception:
+            LOGGER.exception("ROC flood failed")
 
-    # ── B1b: PR curves ────────────────────────────────────────────────────────
+    # ── PR curves ─────────────────────────────────────────────────────────────
     if water_model_data:
         try:
             plot_pr_curves(water_model_data, "PR — Water model", figures_dir, "pr_water")
-        except Exception as exc:  # noqa: BLE001
-            LOGGER.warning("PR water failed: %s", exc)
+        except Exception:
+            LOGGER.exception("PR water failed")
     if flood_model_data:
         try:
             plot_pr_curves(flood_model_data, "PR — Flood model", figures_dir, "pr_flood")
-        except Exception as exc:  # noqa: BLE001
-            LOGGER.warning("PR flood failed: %s", exc)
+        except Exception:
+            LOGGER.exception("PR flood failed")
 
-    # ── B2: Metric bar charts ─────────────────────────────────────────────────
+    # ── Metric bar charts ─────────────────────────────────────────────────────
     try:
         plot_metrics_bar(results, "water", figures_dir, "metrics_bar_water")
-    except Exception as exc:  # noqa: BLE001
-        LOGGER.warning("Metrics bar water failed: %s", exc)
+    except Exception:
+        LOGGER.exception("Metrics bar water failed")
     try:
         plot_metrics_bar(results, "flood", figures_dir, "metrics_bar_flood")
-    except Exception as exc:  # noqa: BLE001
-        LOGGER.warning("Metrics bar flood failed: %s", exc)
+    except Exception:
+        LOGGER.exception("Metrics bar flood failed")
 
-    # ── B3: Calibration diagrams ──────────────────────────────────────────────
+    # ── Calibration diagrams ──────────────────────────────────────────────────
     if water_model_data:
         try:
-            plot_calibration(water_model_data, "Calibration — Water", figures_dir, "calibration_water")
-        except Exception as exc:  # noqa: BLE001
-            LOGGER.warning("Calibration water failed: %s", exc)
+            plot_calibration(
+                water_model_data, "Calibración — Agua", figures_dir, "calibration_water"
+            )
+        except Exception:
+            LOGGER.exception("Calibration water failed")
     if flood_model_data:
         try:
-            plot_calibration(flood_model_data, "Calibration — Flood|Water", figures_dir, "calibration_flood")
-        except Exception as exc:  # noqa: BLE001
-            LOGGER.warning("Calibration flood failed: %s", exc)
+            plot_calibration(
+                flood_model_data, "Calibración — Inundación|Agua",
+                figures_dir, "calibration_flood",
+            )
+        except Exception:
+            LOGGER.exception("Calibration flood failed")
 
-    # ── D: Feature importance ─────────────────────────────────────────────────
+    # ── Feature importance ────────────────────────────────────────────────────
     try:
         plot_feature_importance(results, "water", figures_dir, "feature_importance_water")
-    except Exception as exc:  # noqa: BLE001
-        LOGGER.warning("Feature importance water failed: %s", exc)
+    except Exception:
+        LOGGER.exception("Feature importance water failed")
     try:
         plot_feature_importance(results, "flood", figures_dir, "feature_importance_flood")
-    except Exception as exc:  # noqa: BLE001
-        LOGGER.warning("Feature importance flood failed: %s", exc)
+    except Exception:
+        LOGGER.exception("Feature importance flood failed")
 
-    # ── C: Error maps (if external flood label exists) ────────────────────────
+    # ── Error maps (if external flood label exists) ───────────────────────────
     if cfg.external_labels.flood:
         ext_path = cfg.resolve_path(cfg.external_labels.flood)
         if ext_path.exists():
             try:
-                import rioxarray as rxr
-                ext_da = rxr.open_rasterio(str(ext_path), masked=True).squeeze(drop=True)
-                ext_arr = (ext_da.values > 0).astype(np.uint8)
-                for target in targets_meta:
-                    try:
-                        plot_error_maps(
-                            results,
-                            target["key"],
-                            ext_arr,
-                            task="flood",
-                            label_path_key="p_inundacion_dado_agua",
-                            figures_dir=figures_dir,
-                            stem=f"error_map_{target['key']}",
-                        )
-                    except Exception as exc:  # noqa: BLE001
-                        LOGGER.warning("Error map key=%s failed: %s", target["key"], exc)
-            except Exception as exc:  # noqa: BLE001
-                LOGGER.warning("External label load failed: %s", exc)
+                ext_arr = _load_external_label(ext_path, results)
+                if ext_arr is not None:
+                    for target in targets_meta:
+                        try:
+                            plot_error_maps(
+                                results,
+                                target["key"],
+                                ext_arr,
+                                task="flood",
+                                label_path_key="p_inundacion_dado_agua",
+                                figures_dir=figures_dir,
+                                stem=f"error_map_{target['key']}",
+                            )
+                        except Exception:
+                            LOGGER.exception("Error map key=%s failed", target["key"])
+            except Exception:
+                LOGGER.exception("External label load failed")
 
-    LOGGER.info("All figures saved to %s", figures_dir)
+    LOGGER.info("Todas las figuras guardadas en %s", figures_dir)

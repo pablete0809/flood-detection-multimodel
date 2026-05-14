@@ -83,6 +83,18 @@ def _build_registry(cfg: AppConfig, bundle_dir: Path) -> dict[str, dict[str, Any
         from floodprob.models import train_unet
         return None, train_unet.train_flood_unet_bundle(flood_sets, cfg, bundle_dir=bundle_dir)
 
+    def _train_attention_unet_flood(water_sets, flood_sets):
+        from floodprob.models import train_attention_unet
+        return None, train_attention_unet.train_flood_attention_unet_bundle(
+            flood_sets, cfg, bundle_dir=bundle_dir
+        )
+
+    def _train_deeplabv3plus_flood(water_sets, flood_sets):
+        from floodprob.models import train_deeplabv3plus
+        return None, train_deeplabv3plus.train_flood_deeplabv3plus_bundle(
+            flood_sets, cfg, bundle_dir=bundle_dir
+        )
+
     return {
         # water-only models
         "threshold_change": {
@@ -123,6 +135,16 @@ def _build_registry(cfg: AppConfig, bundle_dir: Path) -> dict[str, dict[str, Any
             "train_flood": _train_unet_flood,
             "predict_flood": _predict_unet_flood,
         },
+        "attention_unet": {
+            "tasks": ["flood"],
+            "train_flood": _train_attention_unet_flood,
+            "predict_flood": _predict_attention_unet_flood,
+        },
+        "deeplabv3plus": {
+            "tasks": ["flood"],
+            "train_flood": _train_deeplabv3plus_flood,
+            "predict_flood": _predict_deeplabv3plus_flood,
+        },
     }
 
 
@@ -153,6 +175,24 @@ def _predict_unet_flood(
 ) -> tuple[xr.DataArray, xr.DataArray | None]:
     from floodprob.models import train_unet
     return train_unet.predict_flood_unet(feature_ds, bundle)
+
+
+def _predict_attention_unet_flood(
+    feature_ds: xr.Dataset,
+    bundle: dict[str, Any],
+    p_water: xr.DataArray | None = None,
+) -> tuple[xr.DataArray, xr.DataArray | None]:
+    from floodprob.models import train_attention_unet
+    return train_attention_unet.predict_flood_attention_unet(feature_ds, bundle)
+
+
+def _predict_deeplabv3plus_flood(
+    feature_ds: xr.Dataset,
+    bundle: dict[str, Any],
+    p_water: xr.DataArray | None = None,
+) -> tuple[xr.DataArray, xr.DataArray | None]:
+    from floodprob.models import train_deeplabv3plus
+    return train_deeplabv3plus.predict_flood_deeplabv3plus(feature_ds, bundle)
 
 
 # ---------------------------------------------------------------------------
@@ -238,8 +278,11 @@ def run_compare(cfg: AppConfig, force_retrain: bool = False) -> dict[str, Any]:
     registry = _build_registry(cfg, paths["models"])
     compare_cfg = cfg.model.compare
 
-    # Collect results per model
-    results: dict[str, Any] = {m: {"water": {}, "flood": {}} for m in registry}
+    # Collect results per model (only models that appear in at least one task list)
+    active_models = set(compare_cfg.models_water) | set(compare_cfg.models_flood)
+    results: dict[str, Any] = {
+        m: {"water": {}, "flood": {}} for m in registry if m in active_models
+    }
 
     # ---- Train + predict water models ----
     for model_name in compare_cfg.models_water:
