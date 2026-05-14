@@ -398,25 +398,23 @@ Evaluación sobre ground truth real del **Copernicus Emergency Management Servic
 
 | Modelo | AUC-ROC | F1 | IoU | Brier |
 |---|---|---|---|---|
-| Threshold (baseline) | 0.761 | 0.00 | 0.00 | 0.102 |
-| Logistic Regression | 0.999 | 0.930 | 0.869 | 0.026 |
-| Random Forest | **1.000** | **0.997** | **0.994** | 0.001 |
-| XGBoost | 1.000 | 0.993 | 0.986 | 0.002 |
-| MLP | 1.000 | 0.996 | 0.993 | 0.001 |
+| Threshold (baseline) | 0.884 | 0.510 | 0.343 | 0.131 |
+| Logistic Regression | 0.999 | 0.957 | 0.918 | 0.011 |
+| Random Forest | **1.000** | **0.998** | **0.996** | **0.001** |
+| XGBoost | 1.000 | 0.993 | 0.986 | 0.001 |
+| MLP | 1.000 | 0.994 | 0.988 | 0.001 |
 
 ### Cabeza de Inundación — P(inundación | agua), evaluada vs. EMSR773
 
 | Modelo | AUC-ROC | F1 | IoU | Brier |
 |---|---|---|---|---|
-| Logistic Regression | 0.618 | 0.039 | 0.020 | 0.023 |
-| Random Forest | 0.740 | 0.127 | 0.068 | 0.018 |
-| XGBoost | 0.717 | **0.156** | **0.085** | 0.011 |
-| MLP | **0.750** | 0.134 | 0.072 | 0.012 |
-| U-Net | 0.689 | 0.027 | 0.014 | 0.203 |
-| Attention U-Net | — | — | — | — |
-| DeepLabV3+ | — | — | — | — |
-
-> Los resultados de Attention U-Net y DeepLabV3+ se actualizarán tras completar la evaluación.
+| Logistic Regression | 0.571 | 0.000 | 0.000 | **0.004** |
+| Random Forest | 0.828 | 0.028 | 0.014 | 0.015 |
+| XGBoost | 0.815 | 0.037 | 0.019 | 0.010 |
+| MLP | 0.788 | 0.018 | 0.009 | 0.007 |
+| U-Net | **0.920** | 0.342 | 0.206 | 0.091 |
+| Attention U-Net | 0.905 | 0.199 | 0.111 | 0.105 |
+| DeepLabV3+ | 0.826 | **0.453** | **0.293** | 0.014 |
 
 **Notas metodológicas:**
 - Las etiquetas de entrenamiento son **pseudo-etiquetas** generadas automáticamente desde cambio SAR + frecuencia histórica de agua; las etiquetas de evaluación son el ground truth externo EMSR773.
@@ -424,7 +422,3 @@ Evaluación sobre ground truth real del **Copernicus Emergency Management Servic
 - La cabeza de agua muestra AUC≈1.0 porque se entrena y evalúa sobre pseudo-etiquetas derivadas del mismo SAR (no sobre EMSR directamente); es un indicador de consistencia interna, no de generalización.
 
 ---
-
-## Licencia
-
-MIT.
