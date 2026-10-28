@@ -21,7 +21,16 @@ import xarray as xr
 
 from floodprob.config import AppConfig
 from floodprob.models.train_flood_given_water import FLOOD_FEATURE_CANDIDATES
-from floodprob.models.train_unet import _extract_patches, _reconstruct
+from floodprob.models.train_unet import (
+    _channel_stats,
+    _enable_mc_dropout,
+    _extract_patches,
+    _normalize,
+    _prepare_inputs,
+    _recalibrate_batchnorm,
+    _reconstruct,
+    _seed_torch,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -165,8 +174,9 @@ def train_flood_attention_unet_bundle(
         raise ValueError("No AttentionUNet training patches collected")
 
     X_all = np.vstack(all_X)
-    X_all = np.nan_to_num(X_all, nan=0.0)
     y_all = np.concatenate(all_y, axis=0)
+    norm_mean, norm_std = _channel_stats(X_all, y_all)
+    X_all = _normalize(X_all, norm_mean, norm_std)
     LOGGER.info("AttentionUNet patches: %s  features: %s  tile: %s", len(X_all), len(feature_names), tile)
 
     # ---- Class weight ----
@@ -180,6 +190,7 @@ def train_flood_attention_unet_bundle(
     y_tensor = torch.from_numpy(np.where(y_all >= 0, y_all, 0.0).astype(np.float32))
     w_tensor = torch.from_numpy(valid_mask.astype(np.float32))
 
+    _seed_torch(cfg.seed)
     loader = DataLoader(
         TensorDataset(torch.from_numpy(X_all), y_tensor, w_tensor),
         batch_size=au_cfg.batch_size,
@@ -207,6 +218,7 @@ def train_flood_attention_unet_bundle(
                 "AttentionUNet epoch %d/%d  loss=%.4f",
                 epoch + 1, au_cfg.epochs, epoch_loss / len(loader),
             )
+    _recalibrate_batchnorm(model, X_all, au_cfg.batch_size, device)
 
     if bundle_dir is None:
         bundle_dir = Path(".")
@@ -225,6 +237,8 @@ def train_flood_attention_unet_bundle(
             "dropout": au_cfg.dropout,
             "mc_samples": au_cfg.mc_samples,
             "tile_size": tile,
+            "norm_mean": norm_mean.tolist(),
+            "norm_std": norm_std.tolist(),
         },
         "feature_importances": None,
     }
@@ -258,13 +272,14 @@ def predict_flood_attention_unet(
     model.load_state_dict(torch.load(weights_path, map_location=device))
 
     feat_stack = np.stack([feature_ds[f].values.astype(np.float32) for f in feature_names], axis=0)
-    feat_stack = np.nan_to_num(feat_stack, nan=0.0)
+    feat_stack = _prepare_inputs(feat_stack, meta)
     patches_X, orig_shape = _extract_patches(feat_stack, tile)
 
     template = feature_ds[feature_names[0]]
 
     n_passes = max(mc_n, 1)
-    model.train()  # keep dropout active for MC sampling
+    _seed_torch(0)
+    _enable_mc_dropout(model)
     mc_results: list[np.ndarray] = []
     with torch.no_grad():
         for _ in range(n_passes):

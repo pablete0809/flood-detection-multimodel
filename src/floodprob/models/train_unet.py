@@ -117,6 +117,93 @@ def _reconstruct(
 
 
 # ---------------------------------------------------------------------------
+# Input normalisation and MC-Dropout helpers (shared by all CNN flood models)
+# ---------------------------------------------------------------------------
+
+def _channel_stats(X: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Per-channel mean/std over labelled, finite training pixels.
+
+    X: (N, C, tile, tile) raw features, y: (N, tile, tile) labels (-1 = ignore).
+    """
+    labelled = y >= 0
+    mean = np.zeros(X.shape[1], dtype=np.float32)
+    std = np.ones(X.shape[1], dtype=np.float32)
+    for c in range(X.shape[1]):
+        vals = X[:, c][labelled]
+        vals = vals[np.isfinite(vals)]
+        if vals.size:
+            mean[c] = vals.mean()
+            std[c] = max(float(vals.std()), 1e-6)
+    return mean, std
+
+
+def _normalize(X: np.ndarray, mean, std) -> np.ndarray:
+    """Standardise channels (axis -3) and fill NaN with 0, i.e. the channel mean."""
+    mean = np.asarray(mean, dtype=np.float32).reshape(-1, 1, 1)
+    std = np.asarray(std, dtype=np.float32).reshape(-1, 1, 1)
+    return np.nan_to_num((X - mean) / std, nan=0.0).astype(np.float32)
+
+
+def _prepare_inputs(feat_stack: np.ndarray, meta: dict[str, Any]) -> np.ndarray:
+    """Apply the training normalisation stored in a bundle (old bundles: NaN → 0 only)."""
+    if "norm_mean" in meta:
+        return _normalize(feat_stack, meta["norm_mean"], meta["norm_std"])
+    return np.nan_to_num(feat_stack, nan=0.0)
+
+
+def _seed_torch(seed: int) -> None:
+    """Make CNN training reproducible: weight init, DataLoader shuffling, dropout."""
+    import torch
+
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+
+def _recalibrate_batchnorm(model, X_all: np.ndarray, batch_size: int, device) -> None:
+    """Recompute BatchNorm running statistics with the final weights.
+
+    During training the running mean/var are an exponential average over activations
+    of earlier, different weights. With few patches and small batches (DeepLabV3+:
+    23 patches, batch 4) they end up far from the final activations and eval-mode
+    predictions collapse (test AUC 0.31 in eval mode vs 0.98 with batch statistics).
+    One no-grad pass with a cumulative average (momentum=None) fixes this.
+    """
+    import torch
+    import torch.nn as nn
+
+    bn_layers = [m for m in model.modules() if isinstance(m, nn.modules.batchnorm._BatchNorm)]
+    if not bn_layers:
+        return
+    momenta = [bn.momentum for bn in bn_layers]
+    for bn in bn_layers:
+        bn.reset_running_stats()
+        bn.momentum = None
+    model.train()
+    with torch.no_grad():
+        for i in range(0, len(X_all), batch_size):
+            model(torch.from_numpy(X_all[i : i + batch_size]).to(device))
+    for bn, momentum in zip(bn_layers, momenta):
+        bn.momentum = momentum
+    model.eval()
+
+
+def _enable_mc_dropout(model) -> None:
+    """BatchNorm in eval mode (running statistics) with dropout still active.
+
+    Calling model.train() for MC-Dropout would also switch BatchNorm to per-batch
+    statistics, so predictions would depend on which patches share a batch.
+    """
+    import torch.nn as nn
+
+    model.eval()
+    for module in model.modules():
+        if isinstance(module, nn.modules.dropout._DropoutNd):
+            module.train()
+
+
+# ---------------------------------------------------------------------------
 # Train
 # ---------------------------------------------------------------------------
 
@@ -163,8 +250,9 @@ def train_flood_unet_bundle(
         raise ValueError("No UNet training patches collected")
 
     X_all = np.vstack(all_patches_X)   # (N, C, tile, tile)
-    X_all = np.nan_to_num(X_all, nan=0.0)  # NaN features (e.g. cloudy NDWI) → 0
     y_all = np.stack([p for arr in all_patches_y for p in arr])  # (N, tile, tile)
+    norm_mean, norm_std = _channel_stats(X_all, y_all)
+    X_all = _normalize(X_all, norm_mean, norm_std)
     LOGGER.info("UNet patches: %s  features: %s  tile: %s", len(X_all), len(feature_names), tile)
 
     # ---- Class weight ----
@@ -183,8 +271,8 @@ def train_flood_unet_bundle(
         y_tensor,
         w_tensor,
     )
+    _seed_torch(cfg.seed)
     loader = DataLoader(dataset, batch_size=unet_cfg.batch_size, shuffle=True, drop_last=False)
-
     model = UNet(in_channels=len(feature_names), dropout=unet_cfg.dropout).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=unet_cfg.lr)
     criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight, reduction="none")
@@ -202,6 +290,7 @@ def train_flood_unet_bundle(
             epoch_loss += loss.item()
         if (epoch + 1) % 5 == 0 or epoch == 0:
             LOGGER.info("UNet epoch %d/%d  loss=%.4f", epoch + 1, unet_cfg.epochs, epoch_loss / len(loader))
+    _recalibrate_batchnorm(model, X_all, unet_cfg.batch_size, device)
 
     # ---- Save model weights ----
     if bundle_dir is None:
@@ -221,6 +310,8 @@ def train_flood_unet_bundle(
             "dropout": unet_cfg.dropout,
             "mc_samples": unet_cfg.mc_samples,
             "tile_size": tile,
+            "norm_mean": norm_mean.tolist(),
+            "norm_std": norm_std.tolist(),
         },
         "feature_importances": None,
     }
@@ -254,14 +345,15 @@ def predict_flood_unet(
     model.load_state_dict(torch.load(weights_path, map_location=device))
 
     feat_stack = np.stack([feature_ds[f].values.astype(np.float32) for f in feature_names], axis=0)
-    feat_stack = np.nan_to_num(feat_stack, nan=0.0)
+    feat_stack = _prepare_inputs(feat_stack, unet_meta)
     patches_X, orig_shape = _extract_patches(feat_stack, tile)
 
     template_name = feature_names[0]
     template = feature_ds[template_name]
 
     # MC-Dropout: keep dropout active during inference
-    model.train()
+    _seed_torch(0)
+    _enable_mc_dropout(model)
     mc_results: list[np.ndarray] = []
     with torch.no_grad():
         for _ in range(mc_n):

@@ -26,6 +26,7 @@ from floodprob.ingest.stac_search import (
     search_sensor_items,
 )
 from floodprob.labels.pseudolabels import (
+    build_ground_truth,
     generate_flood_pseudolabels,
     generate_water_pseudolabels,
     load_external_label,
@@ -105,6 +106,7 @@ def _search_and_stack(
     collection: str,
     window: tuple,
     cache_tag: str,
+    relative_orbits: set[int] | None = None,
 ) -> str:
     items = search_sensor_items(
         client=client,
@@ -115,6 +117,13 @@ def _search_and_stack(
         window=window,
         filters=cfg.filters,
     )
+    if relative_orbits:
+        n_before = len(items)
+        items = [it for it in items if _relative_orbit(it) in relative_orbits]
+        LOGGER.info(
+            "%s: %d/%d items kept for relative orbits %s",
+            cache_tag, len(items), n_before, sorted(relative_orbits),
+        )
     if not items:
         return ""
     epsg = parse_epsg(cfg.crs_salida)
@@ -130,17 +139,47 @@ def _search_and_stack(
     return str(cache_path)
 
 
+def _relative_orbit(item) -> int | None:
+    value = item.properties.get("sat:relative_orbit")
+    return int(value) if value is not None else None
+
+
+def _target_relative_orbits(cfg: AppConfig, client, aoi_geom: dict[str, Any]) -> set[int] | None:
+    """Órbitas relativas S1 de las ventanas de evento (None si no se pueden determinar)."""
+    orbits: set[int] = set()
+    for window in cfg.time.targets:
+        items = search_sensor_items(
+            client=client,
+            stac_cfg=cfg.stac,
+            sensor="s1",
+            collection=cfg.stac.collections.s1,
+            aoi_geojson=aoi_geom,
+            window=window,
+            filters=cfg.filters,
+        )
+        orbits.update(o for o in (_relative_orbit(it) for it in items) if o is not None)
+    if not orbits:
+        LOGGER.warning("S1 items have no sat:relative_orbit; baseline orbit filter disabled.")
+        return None
+    return orbits
+
+
 def run_ingest(cfg: AppConfig) -> dict[str, Any]:
     paths = _run_paths(cfg)
     client = create_stac_client(cfg.stac)
     aoi = read_aoi(cfg.aoi_geojson)
     aoi_geom = aoi_geometry_wgs84(aoi)
 
+    s1_orbits = None
+    if cfg.filters.s1_match_target_orbit:
+        s1_orbits = _target_relative_orbits(cfg, client, aoi_geom)
+
     historical_windows = cfg.time.historical_windows[: cfg.model.n_hist_windows]
     manifest: dict[str, Any] = {
         "created_utc": datetime.now(tz=timezone.utc).isoformat(),
         "run_name": cfg.run_name,
         "api_url": cfg.stac.api_url,
+        "s1_relative_orbits": sorted(s1_orbits) if s1_orbits else None,
         "baseline": {
             "window": [str(cfg.time.baseline[0]), str(cfg.time.baseline[1])],
             "s1": "",
@@ -160,6 +199,7 @@ def run_ingest(cfg: AppConfig) -> dict[str, Any]:
         collection=cfg.stac.collections.s1,
         window=cfg.time.baseline,
         cache_tag=f"s1_baseline_{base_key}",
+        relative_orbits=s1_orbits,
     )
     if not baseline_s1:
         raise RuntimeError("No Sentinel-1 items found for baseline window.")
@@ -226,6 +266,7 @@ def run_ingest(cfg: AppConfig) -> dict[str, Any]:
             collection=cfg.stac.collections.s1,
             window=window,
             cache_tag=f"s1_hist_{key}",
+            relative_orbits=s1_orbits,
         )
         hist_record["s2"] = _search_and_stack(
             cfg,
@@ -344,7 +385,10 @@ def run_preprocess(cfg: AppConfig) -> dict[str, Any]:
             vh_threshold_db=cfg.model.threshold_change.vh_db,
         )
 
-        ext_water = load_external_label(cfg.external_labels.water, template)
+        # external_labels.water es agua PERMANENTE (WorldCover): sirve como referencia
+        # para las pseudo-etiquetas. external_labels.flood es el ground truth del evento
+        # y solo se guarda aparte (flood_gt / water_gt) para evaluación.
+        perm_water_ref = load_external_label(cfg.external_labels.water, template)
         ext_flood = load_external_label(cfg.external_labels.flood, template)
 
         slope_da = feat_ds["slope"] if "slope" in feat_ds else None
@@ -354,23 +398,25 @@ def run_preprocess(cfg: AppConfig) -> dict[str, Any]:
             p_water_initial=p_water_initial,
             freq_agua_hist=feat_ds["freq_agua_hist"],
             slope=slope_da,
-            external_label=ext_water,
+            permanent_ref=perm_water_ref,
         )
         flood_labels = generate_flood_pseudolabels(
             p_water_initial=p_water_initial,
             freq_agua_hist=feat_ds["freq_agua_hist"],
             slope=slope_da,
             dist_to_permwater=dist_da,
-            external_label=ext_flood,
+            permanent_ref=perm_water_ref,
         )
 
-        labels_ds = xr.Dataset(
-            {
-                "water_label": water_labels,
-                "flood_label": flood_labels,
-                "p_water_initial": p_water_initial,
-            }
-        )
+        label_vars = {
+            "water_label": water_labels,
+            "flood_label": flood_labels,
+            "p_water_initial": p_water_initial,
+        }
+        if perm_water_ref is not None:
+            label_vars["perm_water_ref"] = perm_water_ref.rename("perm_water_ref")
+        label_vars.update(build_ground_truth(ext_flood, perm_water_ref))
+        labels_ds = xr.Dataset(label_vars)
 
         feat_path = paths["intermediate"] / f"features_{key}.nc"
         label_path = paths["intermediate"] / f"labels_{key}.nc"

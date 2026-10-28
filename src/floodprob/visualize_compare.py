@@ -30,6 +30,8 @@ import rioxarray  # noqa: F401
 
 from floodprob.compare_metrics import get_roc_curve, get_pr_curve, get_calibration_curve
 from floodprob.config import AppConfig
+from floodprob.labels.pseudolabels import reference_labels
+from floodprob.splits import SPLIT_TEST, split_for_cfg
 
 LOGGER = logging.getLogger(__name__)
 
@@ -115,6 +117,18 @@ def _load_raster(path: str | None) -> np.ndarray | None:
         return None
 
 
+def _load_reference_label(labels_path: str | None, task: str) -> np.ndarray | None:
+    """Etiquetas de referencia de la ventana: ground truth si existe, si no pseudo-etiquetas."""
+    if not labels_path or not Path(labels_path).exists():
+        return None
+    try:
+        lab_ds = xr.open_dataset(Path(labels_path))
+        return reference_labels(lab_ds, task)[0].values.astype(np.float32)
+    except Exception:  # noqa: BLE001
+        LOGGER.warning("No se pudieron cargar etiquetas de %s desde %s", task, labels_path)
+        return None
+
+
 def _get_per_window_metric(results: dict, model: str, task: str, key: str, metric: str) -> float:
     per_w = results[model].get(task, {}).get("per_window", [])
     w = next((wp for wp in per_w if wp["key"] == key), None)
@@ -160,15 +174,8 @@ def plot_sar_context(
         delta_vh  = feat_ds["delta_vh"].values.astype(np.float32)
         vh_before = vh_after - delta_vh
 
-    # Load flood label for contour overlay
-    flood_label: np.ndarray | None = None
-    if labels_path and Path(labels_path).exists():
-        try:
-            lab_ds = xr.open_dataset(Path(labels_path))
-            if "flood_label" in lab_ds:
-                flood_label = lab_ds["flood_label"].values.astype(np.float32)
-        except Exception:
-            LOGGER.warning("No se pudo cargar flood_label para sar_context key=%s", key)
+    # Load flood reference label for contour overlay
+    flood_label = _load_reference_label(labels_path, "flood")
 
     n_rows = 2 if has_vh else 1
     fig, axes = plt.subplots(n_rows, 3, figsize=(13, 4.8 * n_rows), squeeze=False)
@@ -263,19 +270,10 @@ def plot_model_predictions(
     n_flood = len(flood_models)
     n_cols = 1 + max(n_water, n_flood)
 
-    # Load labels
-    water_label: np.ndarray | None = None
-    flood_label: np.ndarray | None = None
+    # Load reference labels
     labels_path = target.get("labels_path")
-    if labels_path and Path(labels_path).exists():
-        try:
-            lab_ds = xr.open_dataset(Path(labels_path))
-            if "water_label" in lab_ds:
-                water_label = lab_ds["water_label"].values.astype(np.float32)
-            if "flood_label" in lab_ds:
-                flood_label = lab_ds["flood_label"].values.astype(np.float32)
-        except Exception:
-            LOGGER.error("No se pudo cargar labels para key=%s", key)
+    water_label = _load_reference_label(labels_path, "water")
+    flood_label = _load_reference_label(labels_path, "flood")
 
     fig, axes = plt.subplots(2, n_cols, figsize=(3.8 * n_cols, 7.5), squeeze=False)
     fig.suptitle(f"Predicciones por modelo — ventana {key}", fontsize=13, fontweight="bold")
@@ -422,16 +420,8 @@ def plot_ensemble_analysis(
         )
         return
 
-    # Load flood label for contour
-    flood_label: np.ndarray | None = None
-    labels_path = target.get("labels_path")
-    if labels_path and Path(labels_path).exists():
-        try:
-            lab_ds = xr.open_dataset(Path(labels_path))
-            if "flood_label" in lab_ds:
-                flood_label = lab_ds["flood_label"].values.astype(np.float32)
-        except Exception:
-            pass
+    # Load flood reference label for contour
+    flood_label = _load_reference_label(target.get("labels_path"), "flood")
 
     # Load all flood predictions for this key
     pred_arrays: dict[str, np.ndarray] = {}
@@ -702,7 +692,7 @@ def plot_metrics_bar(
     stem: str,
 ) -> None:
     metrics_keys = ["auc_roc", "f1", "iou"]
-    label_names  = ["AUC-ROC", "F1@0.5", "IoU"]
+    label_names  = ["AUC-ROC", "F1 (umbral val.)", "IoU (umbral val.)"]
     models = [m for m in results if results[m].get(task, {}).get("overall")]
     if not models:
         LOGGER.warning("No %s metrics to plot bar chart.", task)
@@ -834,7 +824,8 @@ def plot_error_maps(
             ax.set_ylabel("|pred − label|", fontsize=9)
 
         ax = axes[1, ci]
-        y_hat = (p_arr >= 0.5).astype(np.uint8)
+        thr = _get_per_window_metric(results, m, task, key, "threshold")
+        y_hat = (p_arr >= (thr if np.isfinite(thr) else 0.5)).astype(np.uint8)
         rgb = np.zeros((*ext.shape, 3), dtype=np.uint8)
         tp = (y_hat == 1) & (ext == 1)
         fp = (y_hat == 1) & (ext == 0)
@@ -868,16 +859,16 @@ def run_visualize_compare(
     figures_dir = paths["run_dir"] / "figures"
     figures_dir.mkdir(parents=True, exist_ok=True)
 
-    # Helper to load label arrays for curve plots
-    def _labels_for(target: dict, var: str) -> np.ndarray:
-        try:
-            ds = xr.open_dataset(Path(target["labels_path"]))
-            return ds[var].values.astype(np.int16)
-        except Exception:  # noqa: BLE001
+    # Reference labels restricted to the TEST fold, so curves match the reported metrics
+    def _labels_for(target: dict, task: str) -> np.ndarray:
+        arr = _load_reference_label(target.get("labels_path"), task)
+        if arr is None:
             return np.array([], dtype=np.int16)
+        test = split_for_cfg(arr.shape, cfg) == SPLIT_TEST
+        return np.where(test, arr, -1).astype(np.int16)
 
-    water_label_map = {t["key"]: _labels_for(t, "water_label") for t in targets_meta}
-    flood_label_map = {t["key"]: _labels_for(t, "flood_label") for t in targets_meta}
+    water_label_map = {t["key"]: _labels_for(t, "water") for t in targets_meta}
+    flood_label_map = {t["key"]: _labels_for(t, "flood") for t in targets_meta}
 
     # ── A: SAR context (antes / después / cambio) ─────────────────────────────
     for target in targets_meta:

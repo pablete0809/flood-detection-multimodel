@@ -11,7 +11,10 @@ import xarray as xr
 from sklearn.calibration import calibration_curve
 from sklearn.metrics import brier_score_loss, f1_score, jaccard_score, roc_auc_score
 
+from floodprob.compare_metrics import best_f1_threshold
 from floodprob.config import AppConfig
+from floodprob.labels.pseudolabels import reference_labels, training_labels
+from floodprob.splits import SPLIT_TEST, SPLIT_VAL, split_for_cfg
 from floodprob.utils.io import build_run_dirs, read_json, write_json
 
 LOGGER = logging.getLogger(__name__)
@@ -54,13 +57,10 @@ def _reliability_plot(
     plt.close(fig)
 
 
-def _tile_holdout_mask(shape: tuple[int, int], tile_size: int) -> np.ndarray:
-    y_idx = np.arange(shape[0])[:, None]
-    x_idx = np.arange(shape[1])[None, :]
-    tile_y = y_idx // tile_size
-    tile_x = x_idx // tile_size
-    tile_id = tile_y * 10000 + tile_x
-    return (tile_id % 5) == 0
+def _val_threshold(y_sel: np.ndarray, p: np.ndarray, split: np.ndarray) -> float:
+    """F1-optimal threshold on VAL pixels using the training-type labels."""
+    m = (split == SPLIT_VAL) & (y_sel >= 0) & np.isfinite(p)
+    return best_f1_threshold(y_sel[m].astype(np.uint8), p[m])
 
 
 def _safe_auc(y_true: np.ndarray, y_prob: np.ndarray) -> float:
@@ -69,8 +69,9 @@ def _safe_auc(y_true: np.ndarray, y_prob: np.ndarray) -> float:
     return float(roc_auc_score(y_true, y_prob))
 
 
-def _classification_metrics(y_true: np.ndarray, y_prob: np.ndarray) -> dict[str, float]:
-    y_hat = (y_prob >= 0.5).astype(np.uint8)
+def _classification_metrics(
+    y_true: np.ndarray, y_prob: np.ndarray, y_hat: np.ndarray
+) -> dict[str, float]:
     metrics = {
         "f1": float(f1_score(y_true, y_hat)),
         "iou": float(jaccard_score(y_true, y_hat)),
@@ -100,9 +101,12 @@ def run_evaluate(cfg: AppConfig) -> dict:
 
     water_true_all: list[np.ndarray] = []
     water_prob_all: list[np.ndarray] = []
+    water_hat_all: list[np.ndarray] = []
     flood_true_all: list[np.ndarray] = []
     flood_prob_all: list[np.ndarray] = []
+    flood_hat_all: list[np.ndarray] = []
 
+    train_on = cfg.model.train_on
     per_target = []
     for target in pre["targets"]:
         key = target["key"]
@@ -111,34 +115,47 @@ def run_evaluate(cfg: AppConfig) -> dict:
             continue
         p_record = pred_by_key[key]
         labels_ds = xr.open_dataset(target["labels_path"])
-        water_labels = labels_ds["water_label"].values.astype(np.int16)
-        flood_labels = labels_ds["flood_label"].values.astype(np.int16)
+        water_ref, water_src = reference_labels(labels_ds, "water")
+        flood_ref, flood_src = reference_labels(labels_ds, "flood")
+        water_labels = water_ref.values.astype(np.int16)
+        flood_labels = flood_ref.values.astype(np.int16)
 
         p_water = _read_single_band(p_record["p_agua"]).values.astype(np.float32)
         p_flood_gw = _read_single_band(p_record["p_inundacion_dado_agua"]).values.astype(
             np.float32
         )
 
-        holdout = _tile_holdout_mask(p_water.shape, tile_size=cfg.model.tile_size)
+        split = split_for_cfg(p_water.shape, cfg)
+        test = split == SPLIT_TEST
+        water_thr = _val_threshold(
+            training_labels(labels_ds, "water", train_on).values, p_water, split
+        )
+        flood_thr = _val_threshold(
+            training_labels(labels_ds, "flood", train_on).values, p_flood_gw, split
+        )
 
-        water_mask = (water_labels >= 0) & np.isfinite(p_water) & holdout
-        flood_mask = (flood_labels >= 0) & np.isfinite(p_flood_gw) & holdout
+        water_mask = (water_labels >= 0) & np.isfinite(p_water) & test
+        flood_mask = (flood_labels >= 0) & np.isfinite(p_flood_gw) & test
 
         if water_mask.sum() > 0:
             y_w = water_labels[water_mask].astype(np.uint8)
             p_w = np.clip(p_water[water_mask], 0.0, 1.0)
+            h_w = (p_w >= water_thr).astype(np.uint8)
             water_true_all.append(y_w)
             water_prob_all.append(p_w)
-            water_metrics = _classification_metrics(y_w, p_w)
+            water_hat_all.append(h_w)
+            water_metrics = _classification_metrics(y_w, p_w, h_w)
         else:
             water_metrics = {}
 
         if flood_mask.sum() > 0:
             y_f = flood_labels[flood_mask].astype(np.uint8)
             p_f = np.clip(p_flood_gw[flood_mask], 0.0, 1.0)
+            h_f = (p_f >= flood_thr).astype(np.uint8)
             flood_true_all.append(y_f)
             flood_prob_all.append(p_f)
-            flood_metrics = _classification_metrics(y_f, p_f)
+            flood_hat_all.append(h_f)
+            flood_metrics = _classification_metrics(y_f, p_f, h_f)
         else:
             flood_metrics = {}
 
@@ -148,6 +165,10 @@ def run_evaluate(cfg: AppConfig) -> dict:
                 "window": target["window"],
                 "water_metrics": water_metrics,
                 "flood_given_water_metrics": flood_metrics,
+                "water_threshold": water_thr,
+                "flood_threshold": flood_thr,
+                "water_label_source": water_src,
+                "flood_label_source": flood_src,
                 "n_water_eval": int(water_mask.sum()),
                 "n_flood_eval": int(flood_mask.sum()),
             }
@@ -157,7 +178,7 @@ def run_evaluate(cfg: AppConfig) -> dict:
     if water_true_all:
         yw = np.concatenate(water_true_all)
         pw = np.concatenate(water_prob_all)
-        overall["water"] = _classification_metrics(yw, pw)
+        overall["water"] = _classification_metrics(yw, pw, np.concatenate(water_hat_all))
         if len(np.unique(yw)) > 1:
             _reliability_plot(
                 yw,
@@ -171,7 +192,9 @@ def run_evaluate(cfg: AppConfig) -> dict:
     if flood_true_all:
         yf = np.concatenate(flood_true_all)
         pf = np.concatenate(flood_prob_all)
-        overall["flood_given_water"] = _classification_metrics(yf, pf)
+        overall["flood_given_water"] = _classification_metrics(
+            yf, pf, np.concatenate(flood_hat_all)
+        )
         if len(np.unique(yf)) > 1:
             _reliability_plot(
                 yf,
@@ -185,9 +208,14 @@ def run_evaluate(cfg: AppConfig) -> dict:
     report = {
         "created_utc": datetime.now(tz=timezone.utc).isoformat(),
         "run_name": cfg.run_name,
+        "train_on": train_on,
         "spatial_holdout": {
-            "strategy": "tile_modulo_5",
+            "strategy": "random_spatial_blocks",
             "tile_size_px": cfg.model.tile_size,
+            "n_folds": cfg.model.n_folds,
+            "test_fold": cfg.model.test_fold,
+            "val_fold": cfg.model.val_fold,
+            "seed": cfg.seed,
         },
         "overall": overall,
         "per_target": per_target,

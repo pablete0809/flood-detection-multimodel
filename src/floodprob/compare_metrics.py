@@ -31,9 +31,13 @@ def _safe_metric(func, *args, default=float("nan"), **kwargs) -> float:
 def compute_all_metrics(
     y_true: np.ndarray,  # int, values in {0, 1}
     y_prob: np.ndarray,  # float32, values in [0, 1]
+    threshold: float = 0.5,
 ) -> dict[str, float]:
-    """Compute AUC-ROC, F1, PR-AUC, IoU, Brier, ECE for a single model/window."""
-    y_hat = (y_prob >= 0.5).astype(np.uint8)
+    """Compute AUC-ROC, F1, PR-AUC, IoU, Brier, ECE for a single model/window.
+
+    F1 and IoU binarise at `threshold`; the other metrics are threshold-free.
+    """
+    y_hat = (y_prob >= threshold).astype(np.uint8)
     return {
         "auc_roc": _safe_metric(roc_auc_score, y_true, y_prob),
         "f1": _safe_metric(f1_score, y_true, y_hat, zero_division=0.0),
@@ -42,6 +46,15 @@ def compute_all_metrics(
         "brier": _safe_metric(brier_score_loss, y_true, y_prob),
         "ece": _ece(y_true, y_prob),
     }
+
+
+def best_f1_threshold(y_true: np.ndarray, y_prob: np.ndarray, default: float = 0.5) -> float:
+    """Threshold that maximises F1 on (validation) data; `default` if undefined."""
+    if len(y_true) == 0 or y_true.min() == y_true.max():
+        return default
+    prec, rec, thr = precision_recall_curve(y_true, y_prob)
+    f1 = 2 * prec[:-1] * rec[:-1] / np.clip(prec[:-1] + rec[:-1], 1e-12, None)
+    return float(thr[int(np.argmax(f1))])
 
 
 def _ece(y_true: np.ndarray, y_prob: np.ndarray, n_bins: int = 10) -> float:

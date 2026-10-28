@@ -8,13 +8,20 @@ Usage:
 
 The function:
   1. Loads the preprocess manifest.
-  2. For each model in cfg.model.compare.models_water / models_flood:
-       a. Trains a bundle (or loads cached .joblib if already exists).
+  2. Splits every window into spatial blocks (floodprob.splits): train / val / test.
+  3. For each model in cfg.model.compare.models_water / models_flood:
+       a. Trains a bundle on TRAIN pixels only, with labels chosen by
+          cfg.model.train_on ("pseudo" or "gt"), or loads a cached .joblib.
        b. Runs inference → (p_agua, p_std) / (p_inundacion, p_std) DataArrays.
        c. Saves GeoTIFFs: p_agua_{model}_{key}.tif etc.
-       d. Computes metrics vs pseudo-labels (pixels with label != -1).
-  3. Aggregates into manifest_compare.json.
-  4. Calls visualize_compare.run_visualize_compare(cfg, results).
+       d. Picks the F1-optimal threshold on VAL pixels (training-type labels) and
+          computes metrics on TEST pixels against the reference labels (ground truth
+          when available). Every model is scored on the same pixel set.
+  4. Aggregates into manifest_compare.json.
+  5. Calls visualize_compare.run_visualize_compare(cfg, results).
+
+Outputs go to outputs/<run_name>/compare_<train_on>/ so that weakly- and fully-
+supervised runs do not overwrite each other.
 """
 
 import logging
@@ -27,11 +34,13 @@ import numpy as np
 import rioxarray  # noqa: F401
 import xarray as xr
 
-from floodprob.compare_metrics import compute_all_metrics, aggregate_metrics
+from floodprob.compare_metrics import aggregate_metrics, best_f1_threshold, compute_all_metrics
 from floodprob.config import AppConfig
+from floodprob.labels.pseudolabels import reference_labels, training_labels
 from floodprob.models import train_flood_given_water, train_water
 from floodprob.models import train_rf, train_mlp, train_xgboost_water
-from floodprob.utils.io import build_run_dirs, read_json, write_json
+from floodprob.splits import SPLIT_TEST, SPLIT_TRAIN, SPLIT_VAL, mask_to_train, split_for_cfg
+from floodprob.utils.io import build_run_dirs, ensure_dir, read_json, write_json
 from floodprob.utils.geospatial import save_geotiff
 
 LOGGER = logging.getLogger(__name__)
@@ -228,21 +237,45 @@ def _load_or_train(
 # Metrics computation
 # ---------------------------------------------------------------------------
 
-def _eval_window(
-    y_labels: np.ndarray,  # (H, W) int labels
-    p_prob: np.ndarray,    # (H, W) float probabilities
-    tile_size: int,
-) -> dict[str, float]:
-    """Evaluate one model×window using spatial holdout (tile modulo 5)."""
-    H, W = y_labels.shape
-    y_idx = np.arange(H)[:, None]
-    x_idx = np.arange(W)[None, :]
-    holdout = ((y_idx // tile_size) * 10000 + (x_idx // tile_size)) % 5 == 0
+def _feature_valid_mask(feat_ds: xr.Dataset) -> np.ndarray:
+    """Pixels where every 2-D feature is finite: the common evaluation support."""
+    arrays = [feat_ds[v].values for v in feat_ds.data_vars if feat_ds[v].ndim == 2]
+    return np.logical_and.reduce([np.isfinite(a) for a in arrays])
 
-    mask = (y_labels >= 0) & np.isfinite(p_prob) & holdout
-    if mask.sum() == 0:
+
+def _eval_window(
+    y_ref: np.ndarray,     # (H, W) reference labels (ground truth if available)
+    y_sel: np.ndarray,     # (H, W) labels of the training type, used to pick the threshold
+    p_prob: np.ndarray,    # (H, W) float probabilities
+    split: np.ndarray,     # (H, W) SPLIT_* codes
+    valid: np.ndarray,     # (H, W) common feature-valid mask
+) -> dict[str, float]:
+    """Threshold chosen on VAL pixels, metrics computed on TEST pixels."""
+    finite = np.isfinite(p_prob)
+    val = (split == SPLIT_VAL) & (y_sel >= 0) & valid & finite
+    threshold = best_f1_threshold(y_sel[val].astype(np.uint8), p_prob[val])
+
+    test = (split == SPLIT_TEST) & (y_ref >= 0) & valid
+    n_missing = int((test & ~finite).sum())
+    if n_missing:
+        LOGGER.warning("%d test pixels have no prediction and are excluded", n_missing)
+    test &= finite
+    if test.sum() == 0:
         return {}
-    return compute_all_metrics(y_labels[mask].astype(np.uint8), np.clip(p_prob[mask], 0, 1))
+
+    y = y_ref[test].astype(np.uint8)
+    p = np.clip(p_prob[test], 0, 1)
+    metrics = compute_all_metrics(y, p, threshold=threshold)
+    at_05 = compute_all_metrics(y, p, threshold=0.5)
+    metrics.update(
+        threshold=threshold,
+        f1_at_05=at_05["f1"],
+        iou_at_05=at_05["iou"],
+        n_test=float(test.sum()),
+        n_test_pos=float(y.sum()),
+        n_missing_pred=float(n_missing),
+    )
+    return metrics
 
 
 # ---------------------------------------------------------------------------
@@ -250,30 +283,54 @@ def _eval_window(
 # ---------------------------------------------------------------------------
 
 def run_compare(cfg: AppConfig, force_retrain: bool = False) -> dict[str, Any]:
-    paths = build_run_dirs(cfg.outputs.out_dir, cfg.run_name)
-    # Add figures sub-dir
-    figures_dir = paths["run_dir"] / "figures"
-    figures_dir.mkdir(parents=True, exist_ok=True)
+    run_paths = build_run_dirs(cfg.outputs.out_dir, cfg.run_name)
+    train_on = cfg.model.train_on
 
     # Load preprocess manifest
-    manifest_path = paths["metadata"] / "manifest_preprocess.json"
+    manifest_path = run_paths["metadata"] / "manifest_preprocess.json"
     if not manifest_path.exists():
         raise FileNotFoundError(
             f"Preprocess manifest not found: {manifest_path}. Run `floodprob preprocess` first."
         )
     pre = read_json(manifest_path)
 
-    # Build train sets
+    exp_dir = ensure_dir(run_paths["run_dir"] / f"compare_{train_on}")
+    paths = {
+        "run_dir": exp_dir,
+        **{name: ensure_dir(exp_dir / name) for name in ("metadata", "models", "predictions", "figures")},
+    }
+    LOGGER.info("Compare experiment: train_on=%s → %s", train_on, exp_dir)
+
+    # Build train sets (TRAIN pixels only) and per-window evaluation context
     water_train_sets: list[tuple[xr.Dataset, xr.DataArray]] = []
     flood_train_sets: list[tuple[xr.Dataset, xr.DataArray, xr.DataArray]] = []
     targets_meta: list[dict] = []
+    eval_ctx: dict[str, dict[str, Any]] = {}
 
     for target in pre["targets"]:
         feat_ds = xr.open_dataset(Path(target["features_path"]))
         labels_ds = xr.open_dataset(Path(target["labels_path"]))
-        water_train_sets.append((feat_ds, labels_ds["water_label"]))
-        flood_train_sets.append((feat_ds, labels_ds["flood_label"], labels_ds["p_water_initial"]))
+        split = split_for_cfg(labels_ds["flood_label"].shape, cfg)
+
+        water_y = mask_to_train(training_labels(labels_ds, "water", train_on), split)
+        flood_y = mask_to_train(training_labels(labels_ds, "flood", train_on), split)
+        water_train_sets.append((feat_ds, water_y))
+        flood_train_sets.append((feat_ds, flood_y, labels_ds["p_water_initial"]))
         targets_meta.append(target)
+
+        eval_ctx[target["key"]] = {"split": split, "valid": _feature_valid_mask(feat_ds)}
+        LOGGER.info(
+            "Window %s: split px train=%d val=%d test=%d | flood train labels pos=%d neg=%d",
+            target["key"],
+            int((split == SPLIT_TRAIN).sum()), int((split == SPLIT_VAL).sum()),
+            int((split == SPLIT_TEST).sum()),
+            int((flood_y.values == 1).sum()), int((flood_y.values == 0).sum()),
+        )
+
+    def _labels_for_eval(labels_ds: xr.Dataset, task: str) -> tuple[np.ndarray, np.ndarray, str]:
+        y_ref, source = reference_labels(labels_ds, task)
+        y_sel = training_labels(labels_ds, task, train_on)
+        return y_ref.values.astype(np.int16), y_sel.values.astype(np.int16), source
 
     registry = _build_registry(cfg, paths["models"])
     compare_cfg = cfg.model.compare
@@ -325,13 +382,14 @@ def run_compare(cfg: AppConfig, force_retrain: bool = False) -> dict[str, Any]:
                 save_geotiff(p_agua_std, str(std_path), fallback_crs=cfg.crs_salida)
 
             # Metrics
-            water_labels = labels_ds["water_label"].values.astype(np.int16)
-            metrics = _eval_window(water_labels, p_agua.values, cfg.model.tile_size)
+            y_ref, y_sel, label_source = _labels_for_eval(labels_ds, "water")
+            metrics = _eval_window(y_ref, y_sel, p_agua.values, **eval_ctx[key])
             per_window_metrics.append(metrics)
             window_predictions.append({
                 "key": key,
                 "p_agua": str(tif_path),
                 "p_agua_std": str(std_path) if std_path else None,
+                "label_source": label_source,
                 "metrics": metrics,
             })
             LOGGER.info("Water %s key=%s  → %s", model_name, key, metrics)
@@ -424,13 +482,14 @@ def run_compare(cfg: AppConfig, force_retrain: bool = False) -> dict[str, Any]:
                 except Exception as exc:  # noqa: BLE001
                     LOGGER.warning("Could not compute final p_flood for %s key=%s: %s", model_name, key, exc)
 
-            flood_labels = labels_ds["flood_label"].values.astype(np.int16)
-            metrics = _eval_window(flood_labels, p_flood_gw.values, cfg.model.tile_size)
+            y_ref, y_sel, label_source = _labels_for_eval(labels_ds, "flood")
+            metrics = _eval_window(y_ref, y_sel, p_flood_gw.values, **eval_ctx[key])
             per_window_metrics.append(metrics)
             window_predictions.append({
                 "key": key,
                 "p_inundacion_dado_agua": str(tif_path),
                 "p_inundacion_dado_agua_std": str(std_path) if std_path else None,
+                "label_source": label_source,
                 "metrics": metrics,
             })
             LOGGER.info("Flood %s key=%s  → %s", model_name, key, metrics)
@@ -447,6 +506,19 @@ def run_compare(cfg: AppConfig, force_retrain: bool = False) -> dict[str, Any]:
     report = {
         "created_utc": datetime.now(tz=timezone.utc).isoformat(),
         "run_name": cfg.run_name,
+        "protocol": {
+            "train_on": train_on,
+            "split": {
+                "strategy": "random_spatial_blocks",
+                "tile_size_px": cfg.model.tile_size,
+                "n_folds": cfg.model.n_folds,
+                "test_fold": cfg.model.test_fold,
+                "val_fold": cfg.model.val_fold,
+                "seed": cfg.seed,
+            },
+            "threshold": "F1-optimal on VAL fold with training-type labels",
+            "evaluation": "TEST fold, reference labels (gt if available), common feature-valid mask",
+        },
         "models": list(registry.keys()),
         "models_water_trained": compare_cfg.models_water,
         "models_flood_trained": compare_cfg.models_flood,

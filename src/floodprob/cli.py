@@ -85,9 +85,16 @@ def folium_preview(
 def compare(
     config: Path = typer.Option(..., "--config", exists=True, readable=True),
     force_retrain: bool = typer.Option(False, "--force-retrain", help="Ignore cached bundles and retrain all models."),
+    train_on: str = typer.Option(
+        "", "--train-on", help="Override model.train_on: 'pseudo' (weak supervision) or 'gt'."
+    ),
 ) -> None:
     """Train & evaluate all configured models and generate comparison figures."""
     cfg = load_config(config)
+    if train_on:
+        if train_on not in ("pseudo", "gt"):
+            raise typer.BadParameter("--train-on must be 'pseudo' or 'gt'")
+        cfg.model.train_on = train_on
     report = run_compare(cfg, force_retrain=force_retrain)
     LOGGER.info(
         "Compare complete | water_models=%s flood_models=%s",

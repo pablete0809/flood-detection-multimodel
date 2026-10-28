@@ -104,9 +104,16 @@ pip install -e ".[notebook]"
 ├── data/
 │   └── labels/
 │       └── emsr773_flood_mask.geojson  # Ground truth EMSR773 (DANA Valencia oct-2024)
+├── docs/
+│   ├── registro_metodologico.md      # Fallos encontrados, correcciones y su impacto
+│   └── resultados/                   # Manifiestos de métricas de cada versión
+├── scripts/
+│   ├── download_external_data.py     # DEM, WorldCover y máscaras EMS
+│   └── resumen_metricas.py           # manifest_compare.json → tablas Markdown
 ├── src/floodprob/
 │   ├── cli.py                        # CLI: todos los comandos
 │   ├── config.py                     # Configuración Pydantic + YAML
+│   ├── splits.py                     # Partición espacial por bloques (train/val/test)
 │   ├── preprocess.py                 # Orquesta preproceso
 │   ├── train.py                      # Orquesta entrenamiento (un modelo)
 │   ├── predict.py                    # Orquesta inferencia
@@ -221,7 +228,23 @@ floodprob compare --config configs/valencia_example.yaml
 
 # Forzar re-entrenamiento aunque existan bundles cacheados
 floodprob compare --config configs/valencia_example.yaml --force-retrain
+
+# Supervisión débil (pseudo-etiquetas) frente a supervisión completa (ground truth)
+floodprob compare --config configs/valencia_example.yaml --train-on pseudo
+floodprob compare --config configs/valencia_example.yaml --train-on gt
 ```
+
+### Protocolo de entrenamiento y evaluación
+
+- **Etiquetas de entrenamiento** (`model.train_on`):
+  - `pseudo` (por defecto): pseudo-etiquetas automáticas a partir del cambio SAR, el agua histórica y WorldCover. El ground truth del evento **no** se usa para entrenar.
+  - `gt`: la máscara externa de inundación (`external_labels.flood`).
+- **Etiquetas de evaluación:** siempre el ground truth si existe (`flood_gt`; `water_gt` = inundación ∪ agua permanente). Si no hay GT, las pseudo-etiquetas, y el manifiesto lo indica en `label_source`.
+- **Partición espacial** ([`splits.py`](src/floodprob/splits.py)): los tiles de `model.tile_size` píxeles se reparten al azar (semilla `seed`) en `model.n_folds` folds. Uno es test (`test_fold`), otro validación (`val_fold`) y el resto entrenamiento. Los modelos solo ven etiquetas de entrenamiento.
+- **Umbral:** F1 e IoU se calculan con el umbral que maximiza F1 en validación. También se reporta `f1_at_05` y las métricas sin umbral (AUC-ROC, PR-AUC).
+- Todos los modelos se evalúan sobre **los mismos píxeles de test**.
+
+Los fallos metodológicos corregidos para llegar a este protocolo están documentados en [`docs/registro_metodologico.md`](docs/registro_metodologico.md).
 
 ---
 
@@ -291,9 +314,9 @@ model:
 ### Salidas de la comparación
 
 ```
-outputs/<run_name>/
+outputs/<run_name>/compare_<train_on>/   # compare_pseudo/ o compare_gt/
 ├── metadata/
-│   └── manifest_compare.json            # métricas por modelo y ventana
+│   └── manifest_compare.json            # protocolo + métricas por modelo y ventana
 ├── models/
 │   ├── compare_<model>_<task>.joblib    # bundles cacheados (sklearn)
 │   ├── unet_flood.pt                    # pesos PyTorch U-Net
@@ -361,7 +384,10 @@ Si no hay DEM, el pipeline continúa pero con features topográficas limitadas (
 | `crs_salida` | CRS de salida (default `EPSG:25830`) |
 | `resolution_m` | Resolución en metros. `10 m` = más detalle, mayor coste; `20 m` = más rápido |
 | `seed` | Semilla para reproducibilidad de todos los modelos |
-| `model.tile_size` | Tamaño de tile para holdout espacial y patches U-Net/Attention U-Net/DeepLabV3+ (default `128`) |
+| `model.tile_size` | Tamaño de tile para la partición espacial y los patches U-Net/Attention U-Net/DeepLabV3+ (default `128`) |
+| `model.train_on` | `pseudo` (default) o `gt`: etiquetas con las que se entrena |
+| `model.n_folds`, `test_fold`, `val_fold` | Partición espacial por bloques (default 5 folds, test = 0, validación = 1) |
+| `filters.s1_match_target_orbit` | Restringe baseline e históricos S1 a la órbita relativa del evento (default `true`) |
 | `model.calibration` | Método de calibración: `isotonic` o `sigmoid` |
 | `model.ensemble_n` | Número de modelos en el ensemble (default `1`) |
 
@@ -392,33 +418,29 @@ floodprob --verbose compare --config configs/valencia_example.yaml
 
 ## Resultados experimentales — DANA Valencia (octubre 2024)
 
-Evaluación sobre ground truth real del **Copernicus Emergency Management Service** (EMSR773, 190 polígonos de inundación validados, 32.8 km² afectados). No hay imágenes Sentinel-2 disponibles (100% nubosidad durante el evento), por lo que todos los modelos operan **únicamente con SAR** (delta VV/VH, VV/VH en dB, pendiente y distancia a agua permanente).
+Evaluación frente al ground truth del **Copernicus Emergency Management Service** (EMSR773: 1117 geometrías; 82 801 píxeles inundados a 20 m en el AOI, el 18,1 %). No hay Sentinel-2 durante el evento (nubes), así que todos los modelos usan **solo SAR + DEM**. Una sola pasada S1 de evento (2024-11-01, órbita relativa 110); el baseline usa la misma órbita.
 
-### Cabeza de Agua — detección de agua en la imagen de evento
+> Los resultados publicados antes en este README (AUC ≈ 1,0 en agua; F1 ≈ 0 en inundación) eran artefactos de fallos de etiquetado y evaluación. El detalle está en [`docs/registro_metodologico.md`](docs/registro_metodologico.md).
 
-| Modelo | AUC-ROC | F1 | IoU | Brier |
-|---|---|---|---|---|
-| Threshold (baseline) | 0.884 | 0.510 | 0.343 | 0.131 |
-| Logistic Regression | 0.999 | 0.957 | 0.918 | 0.011 |
-| Random Forest | **1.000** | **0.998** | **0.996** | **0.001** |
-| XGBoost | 1.000 | 0.993 | 0.986 | 0.001 |
-| MLP | 1.000 | 0.994 | 0.988 | 0.001 |
+Protocolo: partición espacial por bloques (test = 112 571 píxeles, 18,0 % inundados, los mismos para todos los modelos), umbral elegido en validación. **Una semilla y una partición:** las CNN varían mucho entre semillas; ver la tabla de semillas en el registro (A-08) antes de citar sus cifras.
 
-### Cabeza de Inundación — P(inundación | agua), evaluada vs. EMSR773
+### Cabeza de inundación, evaluada frente a EMSR773
 
-| Modelo | AUC-ROC | F1 | IoU | Brier |
-|---|---|---|---|---|
-| Logistic Regression | 0.571 | 0.000 | 0.000 | **0.004** |
-| Random Forest | 0.828 | 0.028 | 0.014 | 0.015 |
-| XGBoost | 0.815 | 0.037 | 0.019 | 0.010 |
-| MLP | 0.788 | 0.018 | 0.009 | 0.007 |
-| U-Net | **0.920** | 0.342 | 0.206 | 0.091 |
-| Attention U-Net | 0.905 | 0.199 | 0.111 | 0.105 |
-| DeepLabV3+ | 0.826 | **0.453** | **0.293** | 0.014 |
+| Modelo | AUC (pseudo) | PR-AUC (pseudo) | F1 (pseudo) | AUC (GT) | PR-AUC (GT) | F1 (GT) |
+|---|---|---|---|---|---|---|
+| Logistic Regression | 0,921 | 0,806 | **0,736** | 0,950 | 0,908 | 0,861 |
+| Random Forest | 0,836 | 0,510 | 0,327 | 0,973 | 0,945 | 0,886 |
+| XGBoost | 0,755 | 0,371 | 0,322 | 0,973 | 0,945 | 0,891 |
+| MLP | 0,879 | 0,527 | 0,326 | 0,973 | 0,945 | 0,885 |
+| U-Net | 0,933 | 0,743 | 0,247 | **0,987** | **0,967** | **0,922** |
+| Attention U-Net | 0,913 | 0,647 | 0,193 | 0,973 | 0,955 | 0,921 |
+| DeepLabV3+ ¹ | 0,946 | 0,831 | 0,763 | 0,973 | 0,958 | 0,921 |
 
-**Notas metodológicas:**
-- Las etiquetas de entrenamiento son **pseudo-etiquetas** generadas automáticamente desde cambio SAR + frecuencia histórica de agua; las etiquetas de evaluación son el ground truth externo EMSR773.
-- Los F1/IoU bajos en flood reflejan la dificultad real del evento: la DANA afectó zonas históricamente secas, sin Sentinel-2 disponible y con geometría SAR no óptima para inundaciones en zonas agrícolas planas.
-- La cabeza de agua muestra AUC≈1.0 porque se entrena y evalúa sobre pseudo-etiquetas derivadas del mismo SAR (no sobre EMSR directamente); es un indicador de consistencia interna, no de generalización.
+*pseudo* = entrenado solo con pseudo-etiquetas automáticas (supervisión débil). *GT* = entrenado con EMSR773 en los bloques de entrenamiento.
+¹ No determinista e inestable entre semillas (F1 con GT entre 0,35 y 0,92 en 5 semillas).
+
+Con 5 semillas, las U-Net entrenadas con GT dan F1 = 0,923 ± 0,002. Con pseudo-etiquetas dan AUC 0,92 ± 0,04 y F1 0,50 ± 0,28: el umbral elegido con pseudo-etiquetas es el principal factor de pérdida.
+
+Para regenerar las tablas: `python scripts/resumen_metricas.py outputs/valencia_quicktest_rtc/compare_{pseudo,gt}/metadata/manifest_compare.json`.
 
 ---

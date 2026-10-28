@@ -1,0 +1,646 @@
+{
+  "created_utc": "2026-10-28T17:21:19.177355+00:00",
+  "run_name": "valencia_quicktest_rtc",
+  "protocol": {
+    "train_on": "gt",
+    "split": {
+      "strategy": "random_spatial_blocks",
+      "tile_size_px": 128,
+      "n_folds": 5,
+      "test_fold": 0,
+      "val_fold": 1,
+      "seed": 42
+    },
+    "threshold": "F1-optimal on VAL fold with training-type labels",
+    "evaluation": "TEST fold, reference labels (gt if available), common feature-valid mask"
+  },
+  "models": [
+    "threshold_change",
+    "logreg",
+    "random_forest",
+    "xgboost",
+    "mlp",
+    "unet",
+    "attention_unet",
+    "deeplabv3plus"
+  ],
+  "models_water_trained": [
+    "threshold_change",
+    "logreg",
+    "random_forest",
+    "xgboost",
+    "mlp"
+  ],
+  "models_flood_trained": [
+    "logreg",
+    "random_forest",
+    "xgboost",
+    "mlp",
+    "unet",
+    "attention_unet",
+    "deeplabv3plus"
+  ],
+  "results": {
+    "threshold_change": {
+      "water": {
+        "bundle_path": "outputs/valencia_quicktest_rtc/compare_gt/models/compare_threshold_change_water.joblib",
+        "feature_names": [
+          "vv_db",
+          "vh_db",
+          "ratio_db",
+          "delta_vv",
+          "delta_vh",
+          "slope",
+          "freq_agua_hist"
+        ],
+        "feature_importances": null,
+        "per_window": [
+          {
+            "key": "20241028_20241102",
+            "p_agua": "outputs/valencia_quicktest_rtc/compare_gt/predictions/p_agua_threshold_change_20241028_20241102.tif",
+            "p_agua_std": null,
+            "label_source": "gt",
+            "metrics": {
+              "auc_roc": 0.773659506862842,
+              "f1": 0.5703366141595744,
+              "pr_auc": 0.7446676961816601,
+              "iou": 0.39893069921791613,
+              "brier": 0.2209014535732094,
+              "ece": 0.19897611294886336,
+              "threshold": 5.9429155953694135e-05,
+              "f1_at_05": 0.5942869680887536,
+              "iou_at_05": 0.42276549665385443,
+              "n_test": 112571.0,
+              "n_test_pos": 41995.0,
+              "n_missing_pred": 0.0
+            }
+          }
+        ],
+        "overall": {
+          "f1_at_05": 0.5942869680887536,
+          "n_missing_pred": 0.0,
+          "iou": 0.39893069921791613,
+          "brier": 0.2209014535732094,
+          "n_test_pos": 41995.0,
+          "n_test": 112571.0,
+          "ece": 0.19897611294886336,
+          "pr_auc": 0.7446676961816601,
+          "iou_at_05": 0.42276549665385443,
+          "auc_roc": 0.773659506862842,
+          "threshold": 5.9429155953694135e-05,
+          "f1": 0.5703366141595744
+        }
+      },
+      "flood": {}
+    },
+    "logreg": {
+      "water": {
+        "bundle_path": "outputs/valencia_quicktest_rtc/compare_gt/models/compare_logreg_water.joblib",
+        "feature_names": [
+          "vv_db",
+          "vh_db",
+          "ratio_db",
+          "delta_vv",
+          "delta_vh",
+          "slope",
+          "freq_agua_hist"
+        ],
+        "feature_importances": null,
+        "per_window": [
+          {
+            "key": "20241028_20241102",
+            "p_agua": "outputs/valencia_quicktest_rtc/compare_gt/predictions/p_agua_logreg_20241028_20241102.tif",
+            "p_agua_std": null,
+            "label_source": "gt",
+            "metrics": {
+              "auc_roc": 0.9622281603463012,
+              "f1": 0.9136636997834977,
+              "pr_auc": 0.9641484874371817,
+              "iou": 0.8410505104187427,
+              "brier": 0.05025998298024334,
+              "ece": 0.04150315147850672,
+              "threshold": 0.42822614312171936,
+              "f1_at_05": 0.9206310352846145,
+              "iou_at_05": 0.8529345065312046,
+              "n_test": 112571.0,
+              "n_test_pos": 41995.0,
+              "n_missing_pred": 0.0
+            }
+          }
+        ],
+        "overall": {
+          "f1_at_05": 0.9206310352846145,
+          "n_missing_pred": 0.0,
+          "iou": 0.8410505104187427,
+          "brier": 0.05025998298024334,
+          "n_test_pos": 41995.0,
+          "n_test": 112571.0,
+          "ece": 0.04150315147850672,
+          "pr_auc": 0.9641484874371817,
+          "iou_at_05": 0.8529345065312046,
+          "auc_roc": 0.9622281603463012,
+          "threshold": 0.42822614312171936,
+          "f1": 0.9136636997834977
+        }
+      },
+      "flood": {
+        "bundle_path": "outputs/valencia_quicktest_rtc/compare_gt/models/compare_logreg_flood.joblib",
+        "feature_names": [
+          "delta_vv",
+          "delta_vh",
+          "vv_db",
+          "vh_db",
+          "slope",
+          "dist_to_permwater"
+        ],
+        "feature_importances": null,
+        "per_window": [
+          {
+            "key": "20241028_20241102",
+            "p_inundacion_dado_agua": "outputs/valencia_quicktest_rtc/compare_gt/predictions/p_inundacion_logreg_20241028_20241102.tif",
+            "p_inundacion_dado_agua_std": null,
+            "label_source": "gt",
+            "metrics": {
+              "auc_roc": 0.9496478762049411,
+              "f1": 0.8613962782565255,
+              "pr_auc": 0.9081720910258614,
+              "iou": 0.7565373815373816,
+              "brier": 0.03718093085628465,
+              "ece": 0.012042735735166153,
+              "threshold": 0.30929794907569885,
+              "f1_at_05": 0.8752430500814546,
+              "iou_at_05": 0.7781619399149652,
+              "n_test": 112571.0,
+              "n_test_pos": 20312.0,
+              "n_missing_pred": 0.0
+            }
+          }
+        ],
+        "overall": {
+          "f1_at_05": 0.8752430500814546,
+          "n_missing_pred": 0.0,
+          "iou": 0.7565373815373816,
+          "brier": 0.03718093085628465,
+          "n_test_pos": 20312.0,
+          "n_test": 112571.0,
+          "ece": 0.012042735735166153,
+          "pr_auc": 0.9081720910258614,
+          "iou_at_05": 0.7781619399149652,
+          "auc_roc": 0.9496478762049411,
+          "threshold": 0.30929794907569885,
+          "f1": 0.8613962782565255
+        }
+      }
+    },
+    "random_forest": {
+      "water": {
+        "bundle_path": "outputs/valencia_quicktest_rtc/compare_gt/models/compare_random_forest_water.joblib",
+        "feature_names": [
+          "vv_db",
+          "vh_db",
+          "ratio_db",
+          "delta_vv",
+          "delta_vh",
+          "slope",
+          "freq_agua_hist"
+        ],
+        "feature_importances": "[0.38846762 0.3293157  0.0137364  0.03341637 0.0288448  0.20003905\n 0.00618006]",
+        "per_window": [
+          {
+            "key": "20241028_20241102",
+            "p_agua": "outputs/valencia_quicktest_rtc/compare_gt/predictions/p_agua_random_forest_20241028_20241102.tif",
+            "p_agua_std": null,
+            "label_source": "gt",
+            "metrics": {
+              "auc_roc": 0.9755120269483452,
+              "f1": 0.9306545844759747,
+              "pr_auc": 0.9756134337021469,
+              "iou": 0.8703030573333631,
+              "brier": 0.03557468489260654,
+              "ece": 0.013061103850466502,
+              "threshold": 0.1951252967119217,
+              "f1_at_05": 0.9432624983139385,
+              "iou_at_05": 0.8926176054213373,
+              "n_test": 112571.0,
+              "n_test_pos": 41995.0,
+              "n_missing_pred": 0.0
+            }
+          }
+        ],
+        "overall": {
+          "f1_at_05": 0.9432624983139385,
+          "n_missing_pred": 0.0,
+          "iou": 0.8703030573333631,
+          "brier": 0.03557468489260654,
+          "n_test_pos": 41995.0,
+          "n_test": 112571.0,
+          "ece": 0.013061103850466502,
+          "pr_auc": 0.9756134337021469,
+          "iou_at_05": 0.8926176054213373,
+          "auc_roc": 0.9755120269483452,
+          "threshold": 0.1951252967119217,
+          "f1": 0.9306545844759747
+        }
+      },
+      "flood": {
+        "bundle_path": "outputs/valencia_quicktest_rtc/compare_gt/models/compare_random_forest_flood.joblib",
+        "feature_names": [
+          "delta_vv",
+          "delta_vh",
+          "vv_db",
+          "vh_db",
+          "slope",
+          "dist_to_permwater"
+        ],
+        "feature_importances": "[0.35061355 0.2649361  0.10051847 0.07757145 0.16211251 0.04424792]",
+        "per_window": [
+          {
+            "key": "20241028_20241102",
+            "p_inundacion_dado_agua": "outputs/valencia_quicktest_rtc/compare_gt/predictions/p_inundacion_random_forest_20241028_20241102.tif",
+            "p_inundacion_dado_agua_std": null,
+            "label_source": "gt",
+            "metrics": {
+              "auc_roc": 0.9728702594718097,
+              "f1": 0.8861002909126768,
+              "pr_auc": 0.9448924300206123,
+              "iou": 0.7954937807091319,
+              "brier": 0.029146398550903424,
+              "ece": 0.016500035843192325,
+              "threshold": 0.26772183179855347,
+              "f1_at_05": 0.9024377700061715,
+              "iou_at_05": 0.8222201396373179,
+              "n_test": 112571.0,
+              "n_test_pos": 20312.0,
+              "n_missing_pred": 0.0
+            }
+          }
+        ],
+        "overall": {
+          "f1_at_05": 0.9024377700061715,
+          "n_missing_pred": 0.0,
+          "iou": 0.7954937807091319,
+          "brier": 0.029146398550903424,
+          "n_test_pos": 20312.0,
+          "n_test": 112571.0,
+          "ece": 0.016500035843192325,
+          "pr_auc": 0.9448924300206123,
+          "iou_at_05": 0.8222201396373179,
+          "auc_roc": 0.9728702594718097,
+          "threshold": 0.26772183179855347,
+          "f1": 0.8861002909126768
+        }
+      }
+    },
+    "xgboost": {
+      "water": {
+        "bundle_path": "outputs/valencia_quicktest_rtc/compare_gt/models/compare_xgboost_water.joblib",
+        "feature_names": [
+          "vv_db",
+          "vh_db",
+          "ratio_db",
+          "delta_vv",
+          "delta_vh",
+          "slope",
+          "freq_agua_hist"
+        ],
+        "feature_importances": null,
+        "per_window": [
+          {
+            "key": "20241028_20241102",
+            "p_agua": "outputs/valencia_quicktest_rtc/compare_gt/predictions/p_agua_xgboost_20241028_20241102.tif",
+            "p_agua_std": null,
+            "label_source": "gt",
+            "metrics": {
+              "auc_roc": 0.975899889937346,
+              "f1": 0.9320492881923675,
+              "pr_auc": 0.9756973643354095,
+              "iou": 0.8727456032261678,
+              "brier": 0.03644526202436294,
+              "ece": 0.015337442514974136,
+              "threshold": 0.23018161952495575,
+              "f1_at_05": 0.941199553631648,
+              "iou_at_05": 0.8889300687961826,
+              "n_test": 112571.0,
+              "n_test_pos": 41995.0,
+              "n_missing_pred": 0.0
+            }
+          }
+        ],
+        "overall": {
+          "f1_at_05": 0.941199553631648,
+          "n_missing_pred": 0.0,
+          "iou": 0.8727456032261678,
+          "brier": 0.03644526202436294,
+          "n_test_pos": 41995.0,
+          "n_test": 112571.0,
+          "ece": 0.015337442514974136,
+          "pr_auc": 0.9756973643354095,
+          "iou_at_05": 0.8889300687961826,
+          "auc_roc": 0.975899889937346,
+          "threshold": 0.23018161952495575,
+          "f1": 0.9320492881923675
+        }
+      },
+      "flood": {
+        "bundle_path": "outputs/valencia_quicktest_rtc/compare_gt/models/compare_xgboost_flood.joblib",
+        "feature_names": [
+          "delta_vv",
+          "delta_vh",
+          "vv_db",
+          "vh_db",
+          "slope",
+          "dist_to_permwater"
+        ],
+        "feature_importances": null,
+        "per_window": [
+          {
+            "key": "20241028_20241102",
+            "p_inundacion_dado_agua": "outputs/valencia_quicktest_rtc/compare_gt/predictions/p_inundacion_xgboost_20241028_20241102.tif",
+            "p_inundacion_dado_agua_std": null,
+            "label_source": "gt",
+            "metrics": {
+              "auc_roc": 0.9733895381668236,
+              "f1": 0.890560191894458,
+              "pr_auc": 0.9447774406504543,
+              "iou": 0.8027115895680375,
+              "brier": 0.02830574994196641,
+              "ece": 0.007010206498654471,
+              "threshold": 0.1339123398065567,
+              "f1_at_05": 0.9040535222353404,
+              "iou_at_05": 0.824906636024131,
+              "n_test": 112571.0,
+              "n_test_pos": 20312.0,
+              "n_missing_pred": 0.0
+            }
+          }
+        ],
+        "overall": {
+          "f1_at_05": 0.9040535222353404,
+          "n_missing_pred": 0.0,
+          "iou": 0.8027115895680375,
+          "brier": 0.02830574994196641,
+          "n_test_pos": 20312.0,
+          "n_test": 112571.0,
+          "ece": 0.007010206498654471,
+          "pr_auc": 0.9447774406504543,
+          "iou_at_05": 0.824906636024131,
+          "auc_roc": 0.9733895381668236,
+          "threshold": 0.1339123398065567,
+          "f1": 0.890560191894458
+        }
+      }
+    },
+    "mlp": {
+      "water": {
+        "bundle_path": "outputs/valencia_quicktest_rtc/compare_gt/models/compare_mlp_water.joblib",
+        "feature_names": [
+          "vv_db",
+          "vh_db",
+          "ratio_db",
+          "delta_vv",
+          "delta_vh",
+          "slope",
+          "freq_agua_hist"
+        ],
+        "feature_importances": null,
+        "per_window": [
+          {
+            "key": "20241028_20241102",
+            "p_agua": "outputs/valencia_quicktest_rtc/compare_gt/predictions/p_agua_mlp_20241028_20241102.tif",
+            "p_agua_std": null,
+            "label_source": "gt",
+            "metrics": {
+              "auc_roc": 0.9759941259902124,
+              "f1": 0.928334305058125,
+              "pr_auc": 0.9757274489955331,
+              "iou": 0.8662536362223259,
+              "brier": 0.037165634654840074,
+              "ece": 0.017124490489716357,
+              "threshold": 0.23667040467262268,
+              "f1_at_05": 0.9399080036798528,
+              "iou_at_05": 0.8866287142460427,
+              "n_test": 112571.0,
+              "n_test_pos": 41995.0,
+              "n_missing_pred": 0.0
+            }
+          }
+        ],
+        "overall": {
+          "f1_at_05": 0.9399080036798528,
+          "n_missing_pred": 0.0,
+          "iou": 0.8662536362223259,
+          "brier": 0.037165634654840074,
+          "n_test_pos": 41995.0,
+          "n_test": 112571.0,
+          "ece": 0.017124490489716357,
+          "pr_auc": 0.9757274489955331,
+          "iou_at_05": 0.8866287142460427,
+          "auc_roc": 0.9759941259902124,
+          "threshold": 0.23667040467262268,
+          "f1": 0.928334305058125
+        }
+      },
+      "flood": {
+        "bundle_path": "outputs/valencia_quicktest_rtc/compare_gt/models/compare_mlp_flood.joblib",
+        "feature_names": [
+          "delta_vv",
+          "delta_vh",
+          "vv_db",
+          "vh_db",
+          "slope",
+          "dist_to_permwater"
+        ],
+        "feature_importances": null,
+        "per_window": [
+          {
+            "key": "20241028_20241102",
+            "p_inundacion_dado_agua": "outputs/valencia_quicktest_rtc/compare_gt/predictions/p_inundacion_mlp_20241028_20241102.tif",
+            "p_inundacion_dado_agua_std": null,
+            "label_source": "gt",
+            "metrics": {
+              "auc_roc": 0.9730061862506437,
+              "f1": 0.8852523952169931,
+              "pr_auc": 0.9449217220673911,
+              "iou": 0.7941280980723106,
+              "brier": 0.028184097098716943,
+              "ece": 0.0077896096815231325,
+              "threshold": 0.13996359705924988,
+              "f1_at_05": 0.9049256042196971,
+              "iou_at_05": 0.826359932901989,
+              "n_test": 112571.0,
+              "n_test_pos": 20312.0,
+              "n_missing_pred": 0.0
+            }
+          }
+        ],
+        "overall": {
+          "f1_at_05": 0.9049256042196971,
+          "n_missing_pred": 0.0,
+          "iou": 0.7941280980723106,
+          "brier": 0.028184097098716943,
+          "n_test_pos": 20312.0,
+          "n_test": 112571.0,
+          "ece": 0.0077896096815231325,
+          "pr_auc": 0.9449217220673911,
+          "iou_at_05": 0.826359932901989,
+          "auc_roc": 0.9730061862506437,
+          "threshold": 0.13996359705924988,
+          "f1": 0.8852523952169931
+        }
+      }
+    },
+    "unet": {
+      "water": {},
+      "flood": {
+        "bundle_path": "outputs/valencia_quicktest_rtc/compare_gt/models/compare_unet_flood.joblib",
+        "feature_names": [
+          "delta_vv",
+          "delta_vh",
+          "vv_db",
+          "vh_db",
+          "slope",
+          "dist_to_permwater"
+        ],
+        "feature_importances": null,
+        "per_window": [
+          {
+            "key": "20241028_20241102",
+            "p_inundacion_dado_agua": "outputs/valencia_quicktest_rtc/compare_gt/predictions/p_inundacion_unet_20241028_20241102.tif",
+            "p_inundacion_dado_agua_std": "outputs/valencia_quicktest_rtc/compare_gt/predictions/p_inundacion_unet_20241028_20241102_std.tif",
+            "label_source": "gt",
+            "metrics": {
+              "auc_roc": 0.9868232960434549,
+              "f1": 0.9221923914695305,
+              "pr_auc": 0.9674395773804394,
+              "iou": 0.8556187432438783,
+              "brier": 0.07655555519874667,
+              "ece": 0.21784408253981086,
+              "threshold": 0.6474708914756775,
+              "f1_at_05": 0.9221191527357507,
+              "iou_at_05": 0.8554926595793639,
+              "n_test": 112571.0,
+              "n_test_pos": 20312.0,
+              "n_missing_pred": 0.0
+            }
+          }
+        ],
+        "overall": {
+          "f1_at_05": 0.9221191527357507,
+          "n_missing_pred": 0.0,
+          "iou": 0.8556187432438783,
+          "brier": 0.07655555519874667,
+          "n_test_pos": 20312.0,
+          "n_test": 112571.0,
+          "ece": 0.21784408253981086,
+          "pr_auc": 0.9674395773804394,
+          "iou_at_05": 0.8554926595793639,
+          "auc_roc": 0.9868232960434549,
+          "threshold": 0.6474708914756775,
+          "f1": 0.9221923914695305
+        }
+      }
+    },
+    "attention_unet": {
+      "water": {},
+      "flood": {
+        "bundle_path": "outputs/valencia_quicktest_rtc/compare_gt/models/compare_attention_unet_flood.joblib",
+        "feature_names": [
+          "delta_vv",
+          "delta_vh",
+          "vv_db",
+          "vh_db",
+          "slope",
+          "dist_to_permwater"
+        ],
+        "feature_importances": null,
+        "per_window": [
+          {
+            "key": "20241028_20241102",
+            "p_inundacion_dado_agua": "outputs/valencia_quicktest_rtc/compare_gt/predictions/p_inundacion_attention_unet_20241028_20241102.tif",
+            "p_inundacion_dado_agua_std": "outputs/valencia_quicktest_rtc/compare_gt/predictions/p_inundacion_attention_unet_20241028_20241102_std.tif",
+            "label_source": "gt",
+            "metrics": {
+              "auc_roc": 0.9725713269637878,
+              "f1": 0.9213937387876797,
+              "pr_auc": 0.955203804017806,
+              "iou": 0.8542447526236882,
+              "brier": 0.09351896851776069,
+              "ece": 0.24622231218152588,
+              "threshold": 0.620714008808136,
+              "f1_at_05": 0.9180352233038567,
+              "iou_at_05": 0.848489010989011,
+              "n_test": 112571.0,
+              "n_test_pos": 20312.0,
+              "n_missing_pred": 0.0
+            }
+          }
+        ],
+        "overall": {
+          "f1_at_05": 0.9180352233038567,
+          "n_missing_pred": 0.0,
+          "iou": 0.8542447526236882,
+          "brier": 0.09351896851776069,
+          "n_test_pos": 20312.0,
+          "n_test": 112571.0,
+          "ece": 0.24622231218152588,
+          "pr_auc": 0.955203804017806,
+          "iou_at_05": 0.848489010989011,
+          "auc_roc": 0.9725713269637878,
+          "threshold": 0.620714008808136,
+          "f1": 0.9213937387876797
+        }
+      }
+    },
+    "deeplabv3plus": {
+      "water": {},
+      "flood": {
+        "bundle_path": "outputs/valencia_quicktest_rtc/compare_gt/models/compare_deeplabv3plus_flood.joblib",
+        "feature_names": [
+          "delta_vv",
+          "delta_vh",
+          "vv_db",
+          "vh_db",
+          "slope",
+          "dist_to_permwater"
+        ],
+        "feature_importances": null,
+        "per_window": [
+          {
+            "key": "20241028_20241102",
+            "p_inundacion_dado_agua": "outputs/valencia_quicktest_rtc/compare_gt/predictions/p_inundacion_deeplabv3plus_20241028_20241102.tif",
+            "p_inundacion_dado_agua_std": null,
+            "label_source": "gt",
+            "metrics": {
+              "auc_roc": 0.9734540255037702,
+              "f1": 0.9205755177383872,
+              "pr_auc": 0.9575916344926905,
+              "iou": 0.8528392053973014,
+              "brier": 0.03618897671565859,
+              "ece": 0.08582426799586783,
+              "threshold": 0.7330104112625122,
+              "f1_at_05": 0.9120956914439156,
+              "iou_at_05": 0.8383969842480815,
+              "n_test": 112571.0,
+              "n_test_pos": 20312.0,
+              "n_missing_pred": 0.0
+            }
+          }
+        ],
+        "overall": {
+          "f1_at_05": 0.9120956914439156,
+          "n_missing_pred": 0.0,
+          "iou": 0.8528392053973014,
+          "brier": 0.03618897671565859,
+          "n_test_pos": 20312.0,
+          "n_test": 112571.0,
+          "ece": 0.08582426799586783,
+          "pr_auc": 0.9575916344926905,
+          "iou_at_05": 0.8383969842480815,
+          "auc_roc": 0.9734540255037702,
+          "threshold": 0.7330104112625122,
+          "f1": 0.9205755177383872
+        }
+      }
+    }
+  }
+}

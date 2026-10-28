@@ -1,0 +1,362 @@
+[
+ {
+  "train_on": "pseudo",
+  "seed": 42,
+  "model": "unet",
+  "auc_roc": 0.9334,
+  "pr_auc": 0.7429,
+  "f1": 0.2467,
+  "iou": 0.1407,
+  "threshold": 0.8582
+ },
+ {
+  "train_on": "pseudo",
+  "seed": 42,
+  "model": "attention_unet",
+  "auc_roc": 0.9125,
+  "pr_auc": 0.6465,
+  "f1": 0.1933,
+  "iou": 0.107,
+  "threshold": 0.8423
+ },
+ {
+  "train_on": "pseudo",
+  "seed": 42,
+  "model": "deeplabv3plus",
+  "auc_roc": 0.6059,
+  "pr_auc": 0.4457,
+  "f1": 0.4262,
+  "iou": 0.2708,
+  "threshold": 0.6058
+ },
+ {
+  "train_on": "pseudo",
+  "seed": 42,
+  "model": "unet",
+  "auc_roc": 0.9334,
+  "pr_auc": 0.7429,
+  "f1": 0.2467,
+  "iou": 0.1407,
+  "threshold": 0.8582
+ },
+ {
+  "train_on": "pseudo",
+  "seed": 42,
+  "model": "attention_unet",
+  "auc_roc": 0.9125,
+  "pr_auc": 0.6465,
+  "f1": 0.1933,
+  "iou": 0.107,
+  "threshold": 0.8423
+ },
+ {
+  "train_on": "pseudo",
+  "seed": 42,
+  "model": "deeplabv3plus",
+  "auc_roc": 0.783,
+  "pr_auc": 0.5797,
+  "f1": 0.5661,
+  "iou": 0.3948,
+  "threshold": 0.6058
+ },
+ {
+  "train_on": "pseudo",
+  "seed": 1,
+  "model": "unet",
+  "auc_roc": 0.9512,
+  "pr_auc": 0.828,
+  "f1": 0.8622,
+  "iou": 0.7578,
+  "threshold": 0.6642
+ },
+ {
+  "train_on": "pseudo",
+  "seed": 1,
+  "model": "attention_unet",
+  "auc_roc": 0.9393,
+  "pr_auc": 0.7795,
+  "f1": 0.2315,
+  "iou": 0.1309,
+  "threshold": 0.8557
+ },
+ {
+  "train_on": "pseudo",
+  "seed": 1,
+  "model": "deeplabv3plus",
+  "auc_roc": 0.365,
+  "pr_auc": 0.2725,
+  "f1": 0.2593,
+  "iou": 0.1489,
+  "threshold": 0.628
+ },
+ {
+  "train_on": "pseudo",
+  "seed": 2,
+  "model": "unet",
+  "auc_roc": 0.8519,
+  "pr_auc": 0.4421,
+  "f1": 0.2445,
+  "iou": 0.1393,
+  "threshold": 0.7971
+ },
+ {
+  "train_on": "pseudo",
+  "seed": 2,
+  "model": "attention_unet",
+  "auc_roc": 0.8453,
+  "pr_auc": 0.4214,
+  "f1": 0.2708,
+  "iou": 0.1566,
+  "threshold": 0.7671
+ },
+ {
+  "train_on": "pseudo",
+  "seed": 2,
+  "model": "deeplabv3plus",
+  "auc_roc": 0.8301,
+  "pr_auc": 0.6545,
+  "f1": 0.5925,
+  "iou": 0.4209,
+  "threshold": 0.6916
+ },
+ {
+  "train_on": "pseudo",
+  "seed": 3,
+  "model": "unet",
+  "auc_roc": 0.9274,
+  "pr_auc": 0.719,
+  "f1": 0.4183,
+  "iou": 0.2645,
+  "threshold": 0.8664
+ },
+ {
+  "train_on": "pseudo",
+  "seed": 3,
+  "model": "attention_unet",
+  "auc_roc": 0.9552,
+  "pr_auc": 0.8774,
+  "f1": 0.4343,
+  "iou": 0.2774,
+  "threshold": 0.8898
+ },
+ {
+  "train_on": "pseudo",
+  "seed": 3,
+  "model": "deeplabv3plus",
+  "auc_roc": 0.3402,
+  "pr_auc": 0.2792,
+  "f1": 0.2703,
+  "iou": 0.1562,
+  "threshold": 0.6525
+ },
+ {
+  "train_on": "pseudo",
+  "seed": 4,
+  "model": "unet",
+  "auc_roc": 0.926,
+  "pr_auc": 0.6737,
+  "f1": 0.7074,
+  "iou": 0.5472,
+  "threshold": 0.7859
+ },
+ {
+  "train_on": "pseudo",
+  "seed": 4,
+  "model": "attention_unet",
+  "auc_roc": 0.9344,
+  "pr_auc": 0.6989,
+  "f1": 0.2476,
+  "iou": 0.1413,
+  "threshold": 0.8223
+ },
+ {
+  "train_on": "pseudo",
+  "seed": 4,
+  "model": "deeplabv3plus",
+  "auc_roc": 0.6734,
+  "pr_auc": 0.4711,
+  "f1": 0.4854,
+  "iou": 0.3205,
+  "threshold": 0.5824
+ },
+ {
+  "train_on": "gt",
+  "seed": 42,
+  "model": "unet",
+  "auc_roc": 0.9868,
+  "pr_auc": 0.9674,
+  "f1": 0.9222,
+  "iou": 0.8556,
+  "threshold": 0.6475
+ },
+ {
+  "train_on": "gt",
+  "seed": 42,
+  "model": "attention_unet",
+  "auc_roc": 0.9726,
+  "pr_auc": 0.9552,
+  "f1": 0.9214,
+  "iou": 0.8542,
+  "threshold": 0.6207
+ },
+ {
+  "train_on": "gt",
+  "seed": 42,
+  "model": "deeplabv3plus",
+  "auc_roc": 0.9706,
+  "pr_auc": 0.9434,
+  "f1": 0.9186,
+  "iou": 0.8495,
+  "threshold": 0.8006
+ },
+ {
+  "train_on": "gt",
+  "seed": 42,
+  "model": "unet",
+  "auc_roc": 0.9868,
+  "pr_auc": 0.9674,
+  "f1": 0.9222,
+  "iou": 0.8556,
+  "threshold": 0.6475
+ },
+ {
+  "train_on": "gt",
+  "seed": 42,
+  "model": "attention_unet",
+  "auc_roc": 0.9726,
+  "pr_auc": 0.9552,
+  "f1": 0.9214,
+  "iou": 0.8542,
+  "threshold": 0.6207
+ },
+ {
+  "train_on": "gt",
+  "seed": 42,
+  "model": "deeplabv3plus",
+  "auc_roc": 0.9757,
+  "pr_auc": 0.9561,
+  "f1": 0.9234,
+  "iou": 0.8576,
+  "threshold": 0.6575
+ },
+ {
+  "train_on": "gt",
+  "seed": 1,
+  "model": "unet",
+  "auc_roc": 0.9819,
+  "pr_auc": 0.9638,
+  "f1": 0.9255,
+  "iou": 0.8614,
+  "threshold": 0.5392
+ },
+ {
+  "train_on": "gt",
+  "seed": 1,
+  "model": "attention_unet",
+  "auc_roc": 0.9809,
+  "pr_auc": 0.9644,
+  "f1": 0.9246,
+  "iou": 0.8597,
+  "threshold": 0.5881
+ },
+ {
+  "train_on": "gt",
+  "seed": 1,
+  "model": "deeplabv3plus",
+  "auc_roc": 0.4183,
+  "pr_auc": 0.3475,
+  "f1": 0.3459,
+  "iou": 0.2091,
+  "threshold": 0.2953
+ },
+ {
+  "train_on": "gt",
+  "seed": 2,
+  "model": "unet",
+  "auc_roc": 0.9793,
+  "pr_auc": 0.9632,
+  "f1": 0.9209,
+  "iou": 0.8533,
+  "threshold": 0.6605
+ },
+ {
+  "train_on": "gt",
+  "seed": 2,
+  "model": "attention_unet",
+  "auc_roc": 0.9814,
+  "pr_auc": 0.9645,
+  "f1": 0.9247,
+  "iou": 0.86,
+  "threshold": 0.604
+ },
+ {
+  "train_on": "gt",
+  "seed": 2,
+  "model": "deeplabv3plus",
+  "auc_roc": 0.9768,
+  "pr_auc": 0.944,
+  "f1": 0.8984,
+  "iou": 0.8155,
+  "threshold": 0.6077
+ },
+ {
+  "train_on": "gt",
+  "seed": 3,
+  "model": "unet",
+  "auc_roc": 0.9724,
+  "pr_auc": 0.9607,
+  "f1": 0.9221,
+  "iou": 0.8554,
+  "threshold": 0.6995
+ },
+ {
+  "train_on": "gt",
+  "seed": 3,
+  "model": "attention_unet",
+  "auc_roc": 0.9813,
+  "pr_auc": 0.9633,
+  "f1": 0.9231,
+  "iou": 0.8571,
+  "threshold": 0.6408
+ },
+ {
+  "train_on": "gt",
+  "seed": 3,
+  "model": "deeplabv3plus",
+  "auc_roc": 0.6058,
+  "pr_auc": 0.4744,
+  "f1": 0.4703,
+  "iou": 0.3074,
+  "threshold": 0.3047
+ },
+ {
+  "train_on": "gt",
+  "seed": 4,
+  "model": "unet",
+  "auc_roc": 0.9806,
+  "pr_auc": 0.9615,
+  "f1": 0.9224,
+  "iou": 0.856,
+  "threshold": 0.6276
+ },
+ {
+  "train_on": "gt",
+  "seed": 4,
+  "model": "attention_unet",
+  "auc_roc": 0.9838,
+  "pr_auc": 0.9655,
+  "f1": 0.9248,
+  "iou": 0.8601,
+  "threshold": 0.6185
+ },
+ {
+  "train_on": "gt",
+  "seed": 4,
+  "model": "deeplabv3plus",
+  "auc_roc": 0.349,
+  "pr_auc": 0.3441,
+  "f1": 0.3626,
+  "iou": 0.2214,
+  "threshold": 0.2674
+ }
+]

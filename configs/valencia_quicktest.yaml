@@ -27,6 +27,7 @@ filters:
   s2_max_cloud: 40
   s1_orbit_state: "both"
   s1_polarizations: ["VV", "VH"]
+  s1_match_target_orbit: true
 
 dem:
   path: "data/dem/valencia_dem.tif"
@@ -47,6 +48,10 @@ model:
   ensemble_n: 1
   n_hist_windows: 1
   tile_size: 128
+  train_on: "pseudo"   # "pseudo" (supervisión débil) | "gt" (EMSR773); también --train-on
+  n_folds: 5
+  test_fold: 0
+  val_fold: 1
   threshold_change:
     vv_db: -1.2
     vh_db: -1.0

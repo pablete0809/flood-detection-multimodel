@@ -186,11 +186,12 @@ def predict_flood_probability(
     if missing:
         raise ValueError(f"Missing required features for flood prediction: {missing}")
 
+    # The flood head is trained on every labelled pixel (not only on water), so it
+    # predicts everywhere; p_water only provides the output grid. Masking by p_water
+    # here made sklearn models be scored on a different pixel set than the CNNs.
     template = p_water
     X = np.stack([feature_ds[name].values.reshape(-1) for name in feature_names], axis=1)
     valid = np.isfinite(X).all(axis=1)
-    water_mask = p_water.values.reshape(-1) > 0.05
-    valid = valid & water_mask
 
     probs = np.full((len(bundle["models"]), X.shape[0]), np.nan, dtype=np.float32)
     for i, model in enumerate(bundle["models"]):

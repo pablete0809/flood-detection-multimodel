@@ -23,7 +23,15 @@ import xarray as xr
 
 from floodprob.config import AppConfig
 from floodprob.models.train_flood_given_water import FLOOD_FEATURE_CANDIDATES
-from floodprob.models.train_unet import _extract_patches, _reconstruct
+from floodprob.models.train_unet import (
+    _channel_stats,
+    _extract_patches,
+    _normalize,
+    _prepare_inputs,
+    _recalibrate_batchnorm,
+    _reconstruct,
+    _seed_torch,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -84,7 +92,8 @@ def train_flood_deeplabv3plus_bundle(
     if not required.issubset(set(feature_names)):
         raise ValueError(f"DeepLabV3+ requires features {sorted(required)}")
 
-    # Rebuild model with correct in_channels
+    # Rebuild model with correct in_channels (seeded: weight init + DataLoader shuffling)
+    _seed_torch(cfg.seed)
     model, torch = _get_deeplabv3plus_model(len(feature_names), dlv3_cfg.encoder)
 
     tile   = cfg.model.tile_size
@@ -110,8 +119,9 @@ def train_flood_deeplabv3plus_bundle(
         raise ValueError("No DeepLabV3+ training patches collected")
 
     X_all = np.vstack(all_X)
-    X_all = np.nan_to_num(X_all, nan=0.0)
     y_all = np.concatenate(all_y, axis=0)
+    norm_mean, norm_std = _channel_stats(X_all, y_all)
+    X_all = _normalize(X_all, norm_mean, norm_std)
     LOGGER.info("DeepLabV3+ patches: %s  features: %s  tile: %s", len(X_all), len(feature_names), tile)
 
     # ---- Class weight ----
@@ -156,6 +166,7 @@ def train_flood_deeplabv3plus_bundle(
                 epoch + 1, dlv3_cfg.epochs, epoch_loss / len(loader),
                 scheduler.get_last_lr()[0],
             )
+    _recalibrate_batchnorm(model, X_all, dlv3_cfg.batch_size, device)
 
     if bundle_dir is None:
         bundle_dir = Path(".")
@@ -173,6 +184,8 @@ def train_flood_deeplabv3plus_bundle(
             "in_channels": len(feature_names),
             "encoder": dlv3_cfg.encoder,
             "tile_size": tile,
+            "norm_mean": norm_mean.tolist(),
+            "norm_std": norm_std.tolist(),
         },
         "feature_importances": None,
     }
@@ -205,7 +218,7 @@ def predict_flood_deeplabv3plus(
     model.eval()
 
     feat_stack = np.stack([feature_ds[f].values.astype(np.float32) for f in feature_names], axis=0)
-    feat_stack = np.nan_to_num(feat_stack, nan=0.0)
+    feat_stack = _prepare_inputs(feat_stack, meta)
     patches_X, orig_shape = _extract_patches(feat_stack, tile)
 
     template = feature_ds[feature_names[0]]

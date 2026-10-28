@@ -7,7 +7,9 @@ from pathlib import Path
 import xarray as xr
 
 from floodprob.config import AppConfig
+from floodprob.labels.pseudolabels import training_labels
 from floodprob.models import train_flood_given_water, train_water
+from floodprob.splits import mask_to_train, split_for_cfg
 from floodprob.utils.io import build_run_dirs, read_json, write_json
 
 LOGGER = logging.getLogger(__name__)
@@ -34,10 +36,13 @@ def run_train(cfg: AppConfig) -> dict:
         label_path = Path(target["labels_path"])
         feat_ds = xr.open_dataset(feat_path)
         labels_ds = xr.open_dataset(label_path)
+        split = split_for_cfg(labels_ds["flood_label"].shape, cfg)
 
-        water_train_sets.append((feat_ds, labels_ds["water_label"]))
+        water_y = training_labels(labels_ds, "water", cfg.model.train_on)
+        flood_y = training_labels(labels_ds, "flood", cfg.model.train_on)
+        water_train_sets.append((feat_ds, mask_to_train(water_y, split)))
         flood_train_sets.append(
-            (feat_ds, labels_ds["flood_label"], labels_ds["p_water_initial"])
+            (feat_ds, mask_to_train(flood_y, split), labels_ds["p_water_initial"])
         )
 
     water_bundle = train_water.train_water_model_bundle(water_train_sets, cfg)
@@ -51,6 +56,7 @@ def run_train(cfg: AppConfig) -> dict:
     report = {
         "created_utc": datetime.now(tz=timezone.utc).isoformat(),
         "run_name": cfg.run_name,
+        "train_on": cfg.model.train_on,
         "water_model_path": str(water_model_path),
         "flood_model_path": str(flood_model_path),
         "water_model_type": water_bundle["model_type"],

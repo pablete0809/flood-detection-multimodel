@@ -43,6 +43,9 @@ class FiltersConfig(BaseModel):
     s2_max_cloud: float = 30.0
     s1_orbit_state: Literal["ascending", "descending", "both"] = "both"
     s1_polarizations: list[str] = Field(default_factory=lambda: ["VV", "VH"])
+    # Restringe baseline e históricos S1 a las órbitas relativas del evento, para que
+    # delta_vv/delta_vh midan cambio real y no diferencias de geometría de adquisición.
+    s1_match_target_orbit: bool = True
 
 
 class DemConfig(BaseModel):
@@ -118,6 +121,14 @@ class ModelConfig(BaseModel):
     ensemble_n: int = 1
     n_hist_windows: int = 4
     tile_size: int = 128
+    # Origen de las etiquetas de ENTRENAMIENTO: "pseudo" (supervisión débil, sin
+    # ground truth) o "gt" (etiquetas externas). La evaluación usa siempre el GT si existe.
+    train_on: Literal["pseudo", "gt"] = "pseudo"
+    # Partición espacial por bloques de tile_size: un fold de test, uno de validación
+    # (selección de umbral) y el resto de entrenamiento.
+    n_folds: int = 5
+    test_fold: int = 0
+    val_fold: int = 1
     threshold_change: ThresholdChangeConfig = Field(default_factory=ThresholdChangeConfig)
     logreg: LogRegConfig = Field(default_factory=LogRegConfig)
     compare: CompareConfig = Field(default_factory=CompareConfig)

@@ -56,27 +56,43 @@ def load_external_label(
     return da
 
 
+def _permanent_water(
+    freq_agua_hist: xr.DataArray,
+    permanent_ref: xr.DataArray | None,
+    threshold: float,
+) -> xr.DataArray:
+    """Agua permanente: frecuencia histórica alta o, si existe, referencia externa
+    de agua permanente (p. ej. WorldCover clase 80). La referencia es independiente
+    del evento, así que usarla no introduce el ground truth de inundación."""
+    permanent = freq_agua_hist > threshold
+    if permanent_ref is not None:
+        permanent = permanent | (permanent_ref == 1)
+    return permanent
+
+
 def generate_water_pseudolabels(
     p_water_initial: xr.DataArray,
     freq_agua_hist: xr.DataArray,
     slope: xr.DataArray | None,
-    external_label: xr.DataArray | None = None,
+    permanent_ref: xr.DataArray | None = None,
 ) -> xr.DataArray:
+    """Pseudo-etiquetas de agua en la fecha del evento (no de agua permanente).
+
+    Píxeles sin confianza suficiente quedan a -1 y se ignoran al entrenar.
+    """
     labels = _empty_labels(p_water_initial)
     slope_ok = xr.ones_like(p_water_initial, dtype=bool)
     if slope is not None:
         slope_ok = slope < 8.0
 
-    permanent = (freq_agua_hist > 0.6) & slope_ok
+    permanent = _permanent_water(freq_agua_hist, permanent_ref, 0.6) & slope_ok
     high_conf_water = (p_water_initial > 0.8) | permanent
-    high_conf_non_water = (p_water_initial < 0.2) & (freq_agua_hist < 0.25)
+    high_conf_non_water = (p_water_initial < 0.2) & ~_permanent_water(
+        freq_agua_hist, permanent_ref, 0.25
+    )
 
     labels = xr.where(high_conf_non_water, 0, labels)
     labels = xr.where(high_conf_water, 1, labels)
-
-    if external_label is not None:
-        labels = xr.where(external_label == 1, 1, labels)
-        labels = xr.where(external_label == 0, 0, labels)
 
     labels = labels.astype("int8")
     labels.name = "water_label"
@@ -88,8 +104,9 @@ def generate_flood_pseudolabels(
     freq_agua_hist: xr.DataArray,
     slope: xr.DataArray | None,
     dist_to_permwater: xr.DataArray | None,
-    external_label: xr.DataArray | None = None,
+    permanent_ref: xr.DataArray | None = None,
 ) -> xr.DataArray:
+    """Pseudo-etiquetas de inundación = agua nueva respecto al agua permanente."""
     labels = _empty_labels(p_water_initial)
 
     slope_ok = xr.ones_like(p_water_initial, dtype=bool)
@@ -102,22 +119,64 @@ def generate_flood_pseudolabels(
 
     flood_pos = (
         (p_water_initial > 0.6)
-        & (freq_agua_hist < 0.2)
+        & ~_permanent_water(freq_agua_hist, permanent_ref, 0.2)
         & slope_ok
         & dist_ok
     )
-    flood_neg = (freq_agua_hist > 0.5) | (p_water_initial < 0.2)
+    flood_neg = _permanent_water(freq_agua_hist, permanent_ref, 0.5) | (p_water_initial < 0.2)
 
     labels = xr.where(flood_neg, 0, labels)
     labels = xr.where(flood_pos, 1, labels)
 
-    if external_label is not None:
-        labels = xr.where(external_label == 1, 1, labels)
-        labels = xr.where(external_label == 0, 0, labels)
-
     labels = labels.astype("int8")
     labels.name = "flood_label"
     return labels
+
+
+def build_ground_truth(
+    flood_ext: xr.DataArray | None,
+    permanent_ref: xr.DataArray | None,
+) -> dict[str, xr.DataArray]:
+    """Etiquetas de referencia para EVALUACIÓN (nunca se mezclan con las pseudo-etiquetas).
+
+    - flood_gt: máscara externa de inundación (p. ej. EMSR).
+    - water_gt: agua en la fecha del evento = inundación ∪ agua permanente. Solo se
+      construye si hay máscara de inundación: el agua permanente sola no describe
+      el agua del evento.
+    """
+    out: dict[str, xr.DataArray] = {}
+    if flood_ext is None:
+        return out
+    flood_gt = flood_ext.astype("int8")
+    flood_gt.name = "flood_gt"
+    out["flood_gt"] = flood_gt
+    water_gt = flood_gt
+    if permanent_ref is not None:
+        water_gt = ((flood_gt == 1) | (permanent_ref == 1)).astype("int8")
+    water_gt.name = "water_gt"
+    out["water_gt"] = water_gt
+    return out
+
+
+def reference_labels(labels_ds: xr.Dataset, task: str) -> tuple[xr.DataArray, str]:
+    """Etiquetas contra las que se evalúa: GT si existe, si no pseudo-etiquetas."""
+    gt_name = f"{task}_gt"
+    if gt_name in labels_ds:
+        return labels_ds[gt_name], "gt"
+    return labels_ds[f"{task}_label"], "pseudo"
+
+
+def training_labels(labels_ds: xr.Dataset, task: str, train_on: str) -> xr.DataArray:
+    """Etiquetas con las que se entrena según model.train_on."""
+    if train_on == "gt":
+        gt_name = f"{task}_gt"
+        if gt_name not in labels_ds:
+            raise ValueError(
+                f"model.train_on='gt' but labels have no '{gt_name}'. "
+                "Configure external_labels.flood and re-run preprocess."
+            )
+        return labels_ds[gt_name]
+    return labels_ds[f"{task}_label"]
 
 
 def flatten_samples(
