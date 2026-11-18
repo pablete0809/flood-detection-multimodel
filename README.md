@@ -1,160 +1,250 @@
-# flood-detection-multimodel
+# Cartografía probabilística de inundaciones con Sentinel-1: supervisión débil frente a supervisión completa
 
-Pipeline Python STAC-first para detección de inundaciones con Sentinel-1 y Sentinel-2. Dado un área geográfica (AOI) y fechas de interés, descarga imágenes SAR y ópticas automáticamente, extrae features por píxel, entrena modelos de clasificación y genera mapas GeoTIFF de probabilidad de inundación.
+Trabajo de Fin de Grado. Caso de estudio principal: **DANA de Valencia (octubre de 2024)**.
 
-La probabilidad final se descompone mediante la Regla de la Probabilidad Total:
+Este repositorio contiene un sistema reproducible en Python que genera mapas de probabilidad de inundación a partir de imágenes radar de **Sentinel-1**, imágenes ópticas de **Sentinel-2** y un **modelo digital de elevaciones**. Dado un área (AOI) y unas fechas, descarga las imágenes desde catálogos STAC, calcula variables por píxel, entrena y compara ocho modelos y produce mapas GeoTIFF.
 
-```
-P(inundación) = P(agua) × P(inundación | agua)
-```
+La pregunta que guía el trabajo es:
 
-Incluye un **framework de comparación de múltiples modelos** (Threshold, LogReg, Random Forest, XGBoost, MLP, U-Net, Attention U-Net, DeepLabV3+) con métricas estándar y figuras publicables.
+> **¿Cuánto rendimiento se pierde al entrenar con etiquetas generadas automáticamente a partir del radar en lugar de con la cartografía oficial de la inundación, y dónde se produce esa pérdida?**
 
 ---
 
 ## Contenido
 
-- [Requisitos](#requisitos)
+- [Objetivos](#objetivos)
+- [Diseño experimental](#diseño-experimental)
+- [Resultados preliminares](#resultados-preliminares-dana-de-valencia)
+- [Estado del trabajo y hoja de ruta](#estado-del-trabajo-y-hoja-de-ruta)
+- [Entregables](#entregables)
 - [Instalación](#instalación)
-- [Estructura del proyecto](#estructura-del-proyecto)
+- [Reproducir el experimento](#reproducir-el-experimento)
 - [Configuración STAC](#configuración-stac)
-- [Ejecución end-to-end](#ejecución-end-to-end)
-- [Comparación de modelos](#comparación-de-modelos-floodprob-compare)
-- [Salidas](#salidas)
-- [DEM](#dem)
+- [Estructura del proyecto](#estructura-del-proyecto)
+- [Comparación de modelos: detalles](#comparación-de-modelos-detalles)
 - [Notas técnicas](#notas-técnicas)
 - [Referencia de comandos CLI](#referencia-de-comandos-cli)
 
 ---
 
-## Requisitos
+## Objetivos
 
-- Python 3.10+
-- GDAL / rasterio instalados correctamente en el sistema
-- Acceso de red al endpoint STAC (CDSE o Planetary Computer)
+**Objetivo primario.** Desarrollar un sistema reproducible capaz de generar mapas de probabilidad de inundación combinando Sentinel-1, Sentinel-2 y un modelo digital de elevaciones, y medir cuánto rendimiento se pierde cuando, en lugar de entrenar con la cartografía oficial de la inundación, se usan etiquetas generadas de forma automática.
+
+**Objetivos secundarios.**
+
+1. Comprobar si el sistema se puede aplicar a otros eventos y regiones, empezando por la DANA de Málaga de 2025.
+2. Determinar si unas pocas zonas etiquetadas a mano bastan para acercar los resultados de la supervisión débil a los de la completa.
+3. Identificar en qué tipos de terreno fallan las etiquetas automáticas, como arrozales o zonas urbanas.
+4. Valorar si las probabilidades y la incertidumbre que ofrece el sistema son fiables para apoyar decisiones en una emergencia.
+5. Explorar mejoras como el uso de imágenes ópticas sin nubes o de modelos preentrenados.
+6. Publicar el sistema como software libre reutilizable por otros investigadores.
+
+**Hipótesis de trabajo** (a partir de los resultados preliminares): con pseudo-etiquetas, los modelos aprenden a **ordenar** bien los píxeles según su probabilidad de inundación (AUC alto), pero fallan al **elegir el umbral de decisión**. Una pequeña muestra etiquetada para fijar ese umbral recuperaría la mayor parte de la diferencia con la supervisión completa.
+
+---
+
+## Diseño experimental
+
+### Casos de estudio
+
+| Caso | Evento | Referencia | Uso en el TFG |
+|---|---|---|---|
+| Valencia | DANA, 29-oct-2024. Imagen S1 del evento: 2024-11-01, órbita relativa 110 (descendente) | Copernicus EMS **EMSR773** (1117 geometrías) | Evaluación cuantitativa |
+| Málaga | DANA del Guadalhorce, dic-2025 | Sin referencia por ahora ([`malaga_flood_mask.geojson`](data/labels/) vacío) | Aplicación a otro evento: cualitativa salvo que se consiga una máscara EMS |
+
+### Datos de entrada
+
+| Fuente | Variables | Notas |
+|---|---|---|
+| Sentinel-1 RTC (VV, VH) | Retrodispersión del evento, del periodo de referencia y su diferencia (Δ) | El periodo de referencia se restringe a la **misma órbita relativa** que el evento |
+| Sentinel-2 L2A | NDWI, MNDWI | En Valencia no hay imágenes útiles durante el evento por las nubes, así que el experimento usa **SAR + DEM** |
+| DEM | Elevación, pendiente, distancia al agua permanente | GeoTIFF local |
+| ESA WorldCover 2021 (clase 80) | Agua permanente | Referencia para las pseudo-etiquetas, no para entrenar |
+| JRC Global Surface Water | Frecuencia histórica de agua | **Pendiente** (sustituirá a la frecuencia calculada con una sola fecha; ver A-01) |
+
+### Dos regímenes de entrenamiento
+
+| Régimen | `model.train_on` | Etiquetas de entrenamiento |
+|---|---|---|
+| **Supervisión débil** | `pseudo` (por defecto) | Pseudo-etiquetas automáticas: cambio de retrodispersión SAR + referencias de agua permanente. EMSR773 **no** se usa para entrenar. |
+| **Supervisión completa** | `gt` | EMSR773, solo en los bloques de entrenamiento |
+
+Ambos regímenes se evalúan **contra EMSR773** sobre los mismos píxeles de test.
+
+### Modelos
+
+Ocho modelos de complejidad creciente:
+
+| Modelo | Tipo | Tarea |
+|---|---|---|
+| `threshold_change` | Regla fija sobre el cambio SAR (línea base, sin entrenamiento) | agua |
+| `logreg` | Regresión logística calibrada | agua + inundación |
+| `random_forest` | Random Forest calibrado | agua + inundación |
+| `xgboost` | Gradient boosting | agua + inundación |
+| `mlp` | Perceptrón multicapa (3 capas ocultas) | agua + inundación |
+| `unet` | U-Net de 3 niveles con MC-Dropout | inundación |
+| `attention_unet` | U-Net con puertas de atención (Oktay et al., 2018) | inundación |
+| `deeplabv3plus` | DeepLabV3+ con encoder ResNet-34 y ASPP | inundación |
+
+### Protocolo de evaluación
+
+- **Partición espacial por bloques** ([`splits.py`](src/floodprob/splits.py)): la imagen se divide en tiles de `model.tile_size` píxeles que se reparten al azar (semilla `seed`) en `model.n_folds` folds. Uno es test (`test_fold`), otro validación (`val_fold`) y el resto entrenamiento. Así se evita evaluar en zonas contiguas a las de entrenamiento, que estarían autocorrelacionadas (Roberts et al., 2017). Las etiquetas fuera del fold de entrenamiento se ocultan antes de entrenar.
+- **Umbral de decisión:** se elige maximizando F1 en el fold de validación, con etiquetas del mismo tipo que las de entrenamiento. En modo `pseudo` nunca se consulta EMSR773 para elegirlo.
+- **Máscara común:** todos los modelos se evalúan sobre **los mismos píxeles de test** (fold de test ∩ referencia válida ∩ variables finitas).
+- **Métricas:** AUC-ROC, PR-AUC (métrica principal con clases desbalanceadas), F1 e IoU con el umbral de validación, F1@0,5, Brier y ECE (calibración).
+- **Repetibilidad:** las redes neuronales se entrenan con varias semillas y se reportan como media ± desviación típica.
+
+Los fallos metodológicos corregidos para llegar a este protocolo (etiquetas de evaluación usadas para entrenar, holdout degenerado, fuga entre entrenamiento y test, etc.) están documentados en [`docs/registro_metodologico.md`](docs/registro_metodologico.md).
+
+---
+
+## Resultados preliminares: DANA de Valencia
+
+> **Versión v1** (2026-10-28): un solo fold de test y una sola semilla de partición. Las cifras cambiarán al completar los puntos A-01 y A-03 de la [hoja de ruta](#estado-del-trabajo-y-hoja-de-ruta). Los resultados publicados antes en este README (AUC ≈ 1,0 en agua; F1 ≈ 0 en inundación) eran artefactos de fallos de etiquetado y evaluación.
+
+AOI de 685 × 666 píxeles a 20 m. EMSR773 marca 82 801 píxeles inundados (18,1 % del AOI). Test: 112 571 píxeles (18,0 % inundados), los mismos para todos los modelos. Configuración: [`configs/valencia_quicktest.yaml`](configs/valencia_quicktest.yaml).
+
+### Detección de inundación frente a EMSR773
+
+| Modelo | AUC (débil) | PR-AUC (débil) | F1 (débil) | AUC (completa) | PR-AUC (completa) | F1 (completa) |
+|---|---|---|---|---|---|---|
+| Regresión logística | 0,921 | 0,806 | **0,736** | 0,950 | 0,908 | 0,861 |
+| Random Forest | 0,836 | 0,510 | 0,327 | 0,973 | 0,945 | 0,886 |
+| XGBoost | 0,755 | 0,371 | 0,322 | 0,973 | 0,945 | 0,891 |
+| MLP | 0,879 | 0,527 | 0,326 | 0,973 | 0,945 | 0,885 |
+| U-Net | 0,933 | 0,743 | 0,247 | **0,987** | **0,967** | **0,922** |
+| Attention U-Net | 0,913 | 0,647 | 0,193 | 0,973 | 0,955 | 0,921 |
+| DeepLabV3+ ¹ | 0,946 | 0,831 | 0,763 | 0,973 | 0,958 | 0,921 |
+
+*Débil* = entrenado solo con pseudo-etiquetas. *Completa* = entrenado con EMSR773 en los bloques de entrenamiento.
+¹ No determinista e inestable entre semillas (F1 con supervisión completa entre 0,35 y 0,92 en 5 semillas).
+
+Referencia: la propia regla de pseudo-etiquetado, en los píxeles que etiqueta, obtiene F1 = 0,25 frente a EMSR773 en test.
+
+### Primeras lecturas
+
+1. **Techo de supervisión completa:** las U-Net alcanzan F1 = 0,923 ± 0,002 en 5 semillas.
+2. **Supervisión débil:** las U-Net mantienen un AUC de 0,92 ± 0,04, pero su F1 cae a 0,50 ± 0,28. Los modelos ordenan bien los píxeles; lo que falla es el umbral.
+3. **El umbral es el cuello de botella:** si el umbral de la U-Net con pseudo-etiquetas se fija con unos pocos tiles de validación etiquetados con EMSR773, su F1 pasa de 0,24–0,86 a 0,63–0,85 según la semilla (registro, A-08).
+4. **Las pseudo-etiquetas fallan sobre todo en los arrozales de la Albufera:** el 64,5 % de los píxeles inundados según EMSR773 se marcan como agua permanente porque la frecuencia histórica de agua sale de una sola fecha de noviembre (registro, A-01).
+5. **Señal SAR:** el cambio de retrodispersión por sí solo alcanza AUC 0,91 frente a EMSR773. Comparar solo pasadas de la misma órbita reduce la dispersión del cambio en zonas estables de 3,49 a 2,74 dB.
+
+Para regenerar las tablas desde los manifiestos:
+
+```bash
+python scripts/resumen_metricas.py outputs/valencia_quicktest_rtc/compare_{pseudo,gt}/metadata/manifest_compare.json
+```
+
+---
+
+## Estado del trabajo y hoja de ruta
+
+Los identificadores remiten al [registro metodológico](docs/registro_metodologico.md). El calendario completo está en el [cronograma](docs/anteproyecto/cronograma.png).
+
+| ID | Tarea | Objetivo relacionado | Estado |
+|---|---|---|---|
+| F-01 … F-11 | Corrección del protocolo de entrenamiento y evaluación | Primario | Hecho |
+| A-01 | Sustituir la frecuencia histórica de agua de una sola fecha por JRC Global Surface Water y decidir cómo tratar el arrozal inundado estacionalmente | Primario, secundario 3 | Pendiente |
+| A-03 | Validación cruzada rotando los 5 folds de test, con varias semillas | Primario | Pendiente |
+| A-08 | Experimento de umbral con pocas zonas etiquetadas (curva F1 frente a número de tiles etiquetados) | Secundario 2 | Pendiente |
+| — | Análisis de errores por cobertura del suelo (WorldCover) | Secundario 3 | Pendiente |
+| A-02 | Calibración de las CNN (temperature scaling) y análisis de la incertidumbre MC-Dropout | Secundario 4 | Pendiente |
+| A-05 | Málaga: conseguir una máscara de referencia o presentar una aplicación cualitativa | Secundario 1 | Pendiente |
+| A-09 | DeepLabV3+ estable: encoder preentrenado o más pequeño, aumento de datos | Secundario 5 | Pendiente |
+| A-04 | Decidir si se mantiene la descomposición P(agua) × P(inundación \| agua) o se presenta como ablación | Primario | Pendiente |
+| A-06, A-07 | Comprobar con qué imagen se delimitó EMSR773; franja de separación entre bloques | Primario | Pendiente |
+
+---
+
+## Entregables
+
+| Entregable | Ubicación |
+|---|---|
+| Memoria del TFG | Pendiente |
+| Código fuente (paquete `floodprob`) con instrucciones de reproducción | Este repositorio |
+| Mapas de probabilidad e incertidumbre (GeoTIFF) y visor web interactivo | `outputs/<run_name>/` (no versionado) |
+| Tablas de métricas, figuras y registro metodológico | [`docs/resultados/`](docs/resultados/), [`docs/registro_metodologico.md`](docs/registro_metodologico.md) |
+| Artículo científico | Pendiente |
+| Anteproyecto y cronograma | [`docs/anteproyecto/`](docs/anteproyecto/) |
 
 ---
 
 ## Instalación
 
-### 1. Crear entorno virtual
+Requisitos: Python 3.10+, GDAL/rasterio instalados en el sistema y acceso de red al endpoint STAC (CDSE o Planetary Computer).
 
 ```bash
 python -m venv .venv
-```
-
-### 2. Activar el entorno
-
-```bash
-# Linux / macOS
-source .venv/bin/activate
-
-# Windows
-.venv\Scripts\activate
-```
-
-### 3. Actualizar pip
-
-```bash
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install --upgrade pip
-```
 
-### 4. Instalar el paquete base
-
-```bash
+# Paquete base
 pip install -e .
-```
 
-### 5. Instalar dependencias opcionales (recomendado)
-
-Instala **todas** las dependencias del framework de comparación (XGBoost + PyTorch + segmentation-models-pytorch):
-
-```bash
+# Todas las dependencias de la comparación (XGBoost + PyTorch + segmentation-models-pytorch)
 pip install -e ".[compare]"
 ```
 
-O instálalas por separado:
+Extras por separado: `.[xgboost]`, `.[torch]` (U-Net, Attention U-Net, DeepLabV3+; ~2 GB) y `.[notebook]`.
 
-```bash
-# Solo XGBoost
-pip install -e ".[xgboost]"
-
-# Solo PyTorch (U-Net, Attention U-Net, DeepLabV3+, requiere ~2 GB)
-pip install -e ".[torch]"
-
-# Notebooks Jupyter
-pip install -e ".[notebook]"
-```
-
-> **Nota:** Si `pip install -e ".[...]"` falla en tu shell, prueba con comillas simples: `pip install -e '.[compare]'`
-
-> **Nota:** Asegúrate de usar **siempre el Python del entorno virtual** (`source .venv/bin/activate`) antes de ejecutar cualquier comando `floodprob`. Si instalaste dependencias fuera del venv, los comandos fallarán.
+> Si `pip install -e ".[...]"` falla en tu shell, prueba con comillas simples: `pip install -e '.[compare]'`. Usa siempre el Python del entorno virtual antes de ejecutar cualquier comando `floodprob`.
 
 ---
 
-## Estructura del proyecto
+## Reproducir el experimento
 
-```text
-.
-├── configs/
-│   ├── aoi_valencia.geojson          # AOI de ejemplo
-│   ├── template_cdse.yaml            # Plantilla CDSE
-│   ├── template_planetary_computer.yaml
-│   └── valencia_example.yaml         # Config completa de ejemplo
-├── data/
-│   └── labels/
-│       └── emsr773_flood_mask.geojson  # Ground truth EMSR773 (DANA Valencia oct-2024)
-├── docs/
-│   ├── registro_metodologico.md      # Fallos encontrados, correcciones y su impacto
-│   └── resultados/                   # Manifiestos de métricas de cada versión
-├── scripts/
-│   ├── download_external_data.py     # DEM, WorldCover y máscaras EMS
-│   └── resumen_metricas.py           # manifest_compare.json → tablas Markdown
-├── src/floodprob/
-│   ├── cli.py                        # CLI: todos los comandos
-│   ├── config.py                     # Configuración Pydantic + YAML
-│   ├── splits.py                     # Partición espacial por bloques (train/val/test)
-│   ├── preprocess.py                 # Orquesta preproceso
-│   ├── train.py                      # Orquesta entrenamiento (un modelo)
-│   ├── predict.py                    # Orquesta inferencia
-│   ├── evaluate.py                   # Métricas de evaluación
-│   ├── compare.py                    # ★ Orquesta comparación multi-modelo
-│   ├── compare_metrics.py            # ★ Métricas píxel-aware (AUC, F1, IoU…)
-│   ├── visualize_compare.py          # ★ Figuras publicables (PNG 300dpi + PDF)
-│   ├── visualize.py                  # Vista rápida Folium
-│   ├── features/
-│   │   ├── s1.py                     # Features Sentinel-1 (VV, VH, delta…)
-│   │   ├── s2.py                     # Features Sentinel-2 (NDWI, MNDWI)
-│   │   └── dem.py                    # Features DEM (elevation, slope, dist_permwater)
-│   ├── ingest/
-│   │   ├── stac_search.py            # Búsqueda en catálogo STAC
-│   │   └── stack.py                  # Construcción de stacks zarr
-│   ├── labels/
-│   │   └── pseudolabels.py           # Generación de pseudo-etiquetas
-│   ├── models/
-│   │   ├── train_water.py            # Modelo P(agua): Threshold + LogReg
-│   │   ├── train_flood_given_water.py# Modelo P(inund|agua): LogReg + XGBoost
-│   │   ├── train_rf.py               # ★ Random Forest (agua y flood)
-│   │   ├── train_xgboost_water.py    # ★ XGBoost para la cabeza de agua
-│   │   ├── train_mlp.py              # ★ MLP sklearn (agua y flood)
-│   │   ├── train_unet.py             # ★ U-Net PyTorch sobre patches
-│   │   ├── train_attention_unet.py   # ★ Attention U-Net PyTorch (Oktay et al. 2018)
-│   │   └── train_deeplabv3plus.py    # ★ DeepLabV3+ via segmentation-models-pytorch
-│   └── utils/
-│       ├── geospatial.py             # Reproyección, clip, save_geotiff
-│       └── io.py                     # Caché, retries, JSON helpers
-└── pyproject.toml
+### Experimento principal: supervisión débil frente a completa
+
+```bash
+CFG=configs/valencia_quicktest.yaml
+
+# 1. Datos externos: DEM, WorldCover y máscara EMS
+python scripts/download_external_data.py --config $CFG
+
+# 2. Verificar el catálogo STAC y descargar las imágenes (stacks zarr en cache/)
+floodprob stac-check --config $CFG
+floodprob ingest     --config $CFG
+
+# 3. Variables por píxel, pseudo-etiquetas y referencia (flood_gt, water_gt)
+floodprob preprocess --config $CFG
+
+# 4. Entrenar y evaluar los ocho modelos en los dos regímenes
+floodprob compare --config $CFG --train-on pseudo    # → outputs/<run>/compare_pseudo/
+floodprob compare --config $CFG --train-on gt        # → outputs/<run>/compare_gt/
+
+# Forzar el reentrenamiento aunque haya modelos en caché
+floodprob compare --config $CFG --train-on pseudo --force-retrain
 ```
 
-> ★ = ficheros del framework de comparación
+Guarda los manifiestos de cada versión de resultados en [`docs/resultados/`](docs/resultados/) y anota los cambios en el registro metodológico.
+
+### Pipeline de un solo modelo (generar mapas)
+
+```bash
+floodprob train    --config $CFG    # entrena el modelo indicado en la config
+floodprob predict  --config $CFG    # mapas de probabilidad GeoTIFF
+floodprob evaluate --config $CFG    # métricas
+floodprob folium   --config $CFG    # visor interactivo (opcional)
+```
 
 ---
 
 ## Configuración STAC
 
-Usa el fichero de config recomendado: [`configs/valencia_example.yaml`](configs/valencia_example.yaml)
+### Opción A: Microsoft Planetary Computer (la usada en el experimento)
 
-### Opción A — CDSE (Copernicus Data Space Ecosystem)
+```yaml
+stac:
+  api_url: "https://planetarycomputer.microsoft.com/api/stac/v1"
+  collections:
+    s1: "sentinel-1-rtc"     # con corrección radiométrica del terreno
+    s2: "sentinel-2-l2a"
+  auth:
+    type: none   # PC firma los assets automáticamente si tienes planetary_computer instalado
+```
+
+### Opción B: CDSE (Copernicus Data Space Ecosystem)
 
 ```yaml
 stac:
@@ -167,120 +257,67 @@ stac:
     token_env: CDSE_TOKEN   # define esta variable de entorno
 ```
 
-### Opción B — Microsoft Planetary Computer
+Plantillas: [`template_planetary_computer.yaml`](configs/template_planetary_computer.yaml) y [`template_cdse.yaml`](configs/template_cdse.yaml).
 
-```yaml
-stac:
-  api_url: "https://planetarycomputer.microsoft.com/api/stac/v1"
-  collections:
-    s1: "sentinel-1-grd"
-    s2: "sentinel-2-l2a"
-  auth:
-    type: none   # PC firma los assets automáticamente si tienes planetary_computer instalado
-```
+---
 
-Verifica el acceso al catálogo antes de descargar:
+## Estructura del proyecto
 
-```bash
-floodprob stac-check --config configs/valencia_example.yaml
+```text
+.
+├── configs/
+│   ├── valencia_quicktest.yaml       # Experimento principal (AOI reducido, 20 m)
+│   ├── valencia_example.yaml         # AOI completo de Valencia, 10 m
+│   ├── malaga_dana_2025.yaml         # DANA de Málaga (sin referencia todavía)
+│   ├── aoi_*.geojson                 # Áreas de interés
+│   └── template_*.yaml               # Plantillas CDSE / Planetary Computer
+├── data/labels/
+│   └── emsr773_flood_mask.geojson    # Referencia EMSR773 (DANA Valencia)
+├── docs/
+│   ├── registro_metodologico.md      # Fallos, correcciones, hallazgos y puntos abiertos
+│   ├── resultados/                   # Manifiestos de métricas de cada versión
+│   └── anteproyecto/                 # Cronograma del TFG (script + PNG/PDF/SVG)
+├── scripts/
+│   ├── download_external_data.py     # DEM, WorldCover y máscaras EMS
+│   └── resumen_metricas.py           # manifest_compare.json → tablas Markdown
+├── src/floodprob/
+│   ├── cli.py                        # CLI: todos los comandos
+│   ├── config.py                     # Configuración Pydantic + YAML
+│   ├── preprocess.py                 # Variables, pseudo-etiquetas y referencia
+│   ├── splits.py                     # Partición espacial por bloques
+│   ├── compare.py                    # Experimento multi-modelo
+│   ├── compare_metrics.py            # Métricas y elección del umbral
+│   ├── visualize_compare.py          # Figuras (PNG 300 dpi + PDF)
+│   ├── train.py / predict.py / evaluate.py / visualize.py   # Pipeline de un modelo
+│   ├── features/                     # s1.py (VV, VH, Δ), s2.py (NDWI, MNDWI), dem.py
+│   ├── ingest/                       # Búsqueda STAC y stacks zarr
+│   ├── labels/pseudolabels.py        # Generación de pseudo-etiquetas
+│   ├── models/                       # Un fichero por modelo
+│   └── utils/                        # Geoespacial e I/O
+└── pyproject.toml
 ```
 
 ---
 
-## Ejecución end-to-end
+## Comparación de modelos: detalles
 
-Hay dos flujos según el objetivo:
+### Arquitecturas de red neuronal
 
-### Flujo A — modelo único (train/predict/evaluate)
+- **U-Net:** encoder–decoder de 3 niveles (`C_in → 16 → 32 → 64`) con skip connections. MC-Dropout para estimar la incertidumbre.
+- **Attention U-Net:** U-Net con puertas de atención aditivas en cada skip connection (Oktay et al., 2018), que aprenden a resaltar las zonas relevantes del encoder.
+- **DeepLabV3+:** encoder ResNet-34 con ASPP (convoluciones dilatadas multiescala) y decoder ligero, vía `segmentation-models-pytorch`. Entrenada desde cero (`encoder_weights=None`) con cosine LR annealing. Con pocos patches es inestable (A-09).
 
-```bash
-# 1. Verificar acceso al catálogo STAC
-floodprob stac-check --config configs/valencia_example.yaml
-
-# 2. Descargar imágenes (stacks zarr en cache/)
-floodprob ingest --config configs/valencia_example.yaml
-
-# 3. Calcular features y pseudo-etiquetas
-floodprob preprocess --config configs/valencia_example.yaml
-
-# 4. Entrenar el modelo principal (un solo modelo según config)
-floodprob train --config configs/valencia_example.yaml
-
-# 5. Generar mapas de probabilidad
-floodprob predict --config configs/valencia_example.yaml
-
-# 6. Evaluar métricas
-floodprob evaluate --config configs/valencia_example.yaml
-
-# 7. Vista interactiva Folium (opcional)
-floodprob folium --config configs/valencia_example.yaml
-```
-
-### Flujo B — comparación multi-modelo ★ (recomendado)
-
-Entrena y evalúa todos los modelos en una sola ejecución, generando figuras publicables. Solo requiere `preprocess` como paso previo.
-
-```bash
-# 1–3. Igual que el Flujo A (stac-check, ingest, preprocess)
-
-# 4. Comparar todos los modelos y generar figuras
-floodprob compare --config configs/valencia_example.yaml
-
-# Forzar re-entrenamiento aunque existan bundles cacheados
-floodprob compare --config configs/valencia_example.yaml --force-retrain
-
-# Supervisión débil (pseudo-etiquetas) frente a supervisión completa (ground truth)
-floodprob compare --config configs/valencia_example.yaml --train-on pseudo
-floodprob compare --config configs/valencia_example.yaml --train-on gt
-```
-
-### Protocolo de entrenamiento y evaluación
-
-- **Etiquetas de entrenamiento** (`model.train_on`):
-  - `pseudo` (por defecto): pseudo-etiquetas automáticas a partir del cambio SAR, el agua histórica y WorldCover. El ground truth del evento **no** se usa para entrenar.
-  - `gt`: la máscara externa de inundación (`external_labels.flood`).
-- **Etiquetas de evaluación:** siempre el ground truth si existe (`flood_gt`; `water_gt` = inundación ∪ agua permanente). Si no hay GT, las pseudo-etiquetas, y el manifiesto lo indica en `label_source`.
-- **Partición espacial** ([`splits.py`](src/floodprob/splits.py)): los tiles de `model.tile_size` píxeles se reparten al azar (semilla `seed`) en `model.n_folds` folds. Uno es test (`test_fold`), otro validación (`val_fold`) y el resto entrenamiento. Los modelos solo ven etiquetas de entrenamiento.
-- **Umbral:** F1 e IoU se calculan con el umbral que maximiza F1 en validación. También se reporta `f1_at_05` y las métricas sin umbral (AUC-ROC, PR-AUC).
-- Todos los modelos se evalúan sobre **los mismos píxeles de test**.
-
-Los fallos metodológicos corregidos para llegar a este protocolo están documentados en [`docs/registro_metodologico.md`](docs/registro_metodologico.md).
-
----
-
-## Comparación de modelos (`floodprob compare`)
-
-El comando `compare` entrena y evalúa múltiples modelos en una sola ejecución y genera figuras publicables.
-
-### Modelos disponibles
-
-| Modelo | Tarea | Notas |
-|---|---|---|
-| `threshold_change` | agua | Regla fija (baseline), sin entrenamiento |
-| `logreg` | agua + flood | Regresión logística calibrada (sklearn) |
-| `random_forest` | agua + flood | Random Forest con CalibratedClassifierCV |
-| `xgboost` | agua + flood | XGBoost; requiere `pip install -e ".[xgboost]"` |
-| `mlp` | agua + flood | MLP 3 capas ocultas (sklearn, CPU) |
-| `unet` | flood | U-Net PyTorch 3-nivel con MC-Dropout; requiere `pip install -e ".[torch]"` |
-| `attention_unet` | flood | **★ NUEVO** Attention U-Net (Oktay et al. 2018) — puertas de atención en skip connections; requiere `.[torch]` |
-| `deeplabv3plus` | flood | **★ NUEVO** DeepLabV3+ encoder ResNet-34 con ASPP; requiere `pip install -e ".[compare]"` |
-
-### Arquitecturas de red neural
-
-#### U-Net (base)
-Encoder–decoder 3 niveles con skip connections directas. MC-Dropout para estimación de incertidumbre.
-Canales: `C_in → 16 → 32 → 64` (encoder), simétrico en decoder.
-
-#### Attention U-Net ★
-Igual que U-Net pero con **puertas de atención** (attention gates) en cada skip connection del decoder. La puerta aprende qué regiones del encoder son relevantes para la predicción de inundación, suprimiendo el ruido de fondo y amplificando las zonas inundadas. Implementación: Oktay et al. (2018) — formulación aditiva.
-
-#### DeepLabV3+ ★
-Encoder ResNet-34 con **ASPP** (Atrous Spatial Pyramid Pooling) para captura de contexto multi-escala sin reducir resolución, más un decoder ligero con skip connection desde el encoder. Entrenado desde cero (`encoder_weights=None`) dado que los datos SAR difieren de ImageNet. Usa cosine LR annealing. Implementado vía `segmentation-models-pytorch`.
+Las entradas de las CNN se estandarizan por canal con estadísticas del fold de entrenamiento. Al terminar el entrenamiento se recalibran las estadísticas de BatchNorm.
 
 ### Configurar en YAML
 
 ```yaml
 model:
+  train_on: "pseudo"     # "pseudo" | "gt"; también --train-on
+  tile_size: 128
+  n_folds: 5
+  test_fold: 0
+  val_fold: 1
   compare:
     models_water:  ["threshold_change", "logreg", "random_forest", "xgboost", "mlp"]
     models_flood:  ["logreg", "random_forest", "xgboost", "mlp", "unet", "attention_unet", "deeplabv3plus"]
@@ -311,69 +348,31 @@ model:
       batch_size: 4
 ```
 
-### Salidas de la comparación
+### Salidas
 
 ```
 outputs/<run_name>/compare_<train_on>/   # compare_pseudo/ o compare_gt/
 ├── metadata/
 │   └── manifest_compare.json            # protocolo + métricas por modelo y ventana
-├── models/
-│   ├── compare_<model>_<task>.joblib    # bundles cacheados (sklearn)
-│   ├── unet_flood.pt                    # pesos PyTorch U-Net
-│   ├── attention_unet_flood.pt          # pesos PyTorch Attention U-Net ★
-│   └── deeplabv3plus_flood.pt           # pesos PyTorch DeepLabV3+ ★
+├── models/                              # bundles sklearn (.joblib) y pesos PyTorch (.pt)
 ├── predictions/
 │   ├── p_agua_<model>_<key>.tif
 │   ├── p_inundacion_<model>_<key>.tif
 │   └── p_inundacion_final_<model>_<key>.tif
 └── figures/                             # PNG (300 dpi) + PDF
-    ├── sar_context_<key>.png            # ★ SAR antes/después/cambio + contorno GT
-    ├── model_predictions_<key>.png      # ★ Grid ground truth + predicciones por modelo
-    ├── ensemble_analysis_<key>.png      # ★ Acuerdo, incertidumbre, mejor/peor modelo
-    ├── roc_water.png / roc_flood.png    # curvas ROC por tarea
-    ├── pr_water.png / pr_flood.png      # curvas Precision-Recall
-    ├── metrics_bar_water.png / metrics_bar_flood.png  # barras F1, IoU, AUC
-    ├── calibration_water.png / calibration_flood.png  # reliability diagrams
-    ├── feature_importance_water.png / feature_importance_flood.png
-    └── error_map_<key>.png              # solo si external_labels.flood está definido
+    ├── sar_context_<key>.png            # SAR antes / después / cambio + contorno de la referencia
+    ├── model_predictions_<key>.png      # referencia + predicción de cada modelo
+    ├── ensemble_analysis_<key>.png      # acuerdo entre modelos, incertidumbre, mejor y peor modelo
+    ├── roc_*.png / pr_*.png             # curvas ROC y precisión-exhaustividad
+    ├── metrics_bar_*.png                # barras F1, IoU, AUC
+    ├── calibration_*.png                # diagramas de fiabilidad
+    ├── feature_importance_*.png
+    └── error_map_<key>.png              # solo si hay referencia de inundación
 ```
 
-### Figuras nuevas ★
+El pipeline de un solo modelo escribe en `outputs/<run_name>/predictions/` (`p_agua`, `p_inundacion_dado_agua` y `p_inundacion` = P(agua) × P(inundación | agua)) y en `outputs/<run_name>/evaluation/` (`metrics.json` y diagramas de fiabilidad).
 
-| Figura | Descripción |
-|---|---|
-| `sar_context_<key>.png` | SAR antes (baseline) / después (evento) / cambio (Δ) para VV y VH. Superpone contorno rojo con el ground truth de inundación. |
-| `model_predictions_<key>.png` | Grid completo: columna ground truth + una columna por modelo. Fila superior P(agua), fila inferior P(inundación\|agua). Escala fija [0,1], contorno blanco al umbral 0.5, métricas AUC/F1/IoU en título. |
-| `ensemble_analysis_<key>.png` | 4 paneles: acuerdo entre modelos, incertidumbre (σ pixel a pixel), predicción del mejor modelo (F1 máx), predicción del peor modelo (F1 mín). |
-
----
-
-## Salidas del pipeline principal
-
-En `outputs/<run_name>/predictions/`:
-
-| Fichero | Descripción |
-|---|---|
-| `p_agua_<window>.tif` | P(agua) — probabilidad de presencia de agua |
-| `p_inundacion_dado_agua_<window>.tif` | P(inundación \| agua) |
-| `p_inundacion_<window>.tif` | P(inundación) = P(agua) × P(inund.\|agua) |
-
-En `outputs/<run_name>/evaluation/`:
-- `metrics.json` — AUC-ROC, F1, IoU, Brier, ECE
-- `reliability_water.png` / `reliability_flood.png` — diagramas de calibración
-
----
-
-## DEM
-
-El pipeline no descarga DEM automáticamente. Coloca un GeoTIFF local y apúntalo en el YAML:
-
-```yaml
-dem:
-  path: data/dem/valencia_dem.tif
-```
-
-Si no hay DEM, el pipeline continúa pero con features topográficas limitadas (sin `slope`, `elevation`, `dist_to_permwater`).
+> **Nota sobre P(agua) × P(inundación | agua):** ahora mismo la cabeza de inundación se entrena sobre todos los píxeles, como un clasificador directo, así que el producto no es estrictamente la regla de la probabilidad total (A-04). El experimento principal evalúa la cabeza de inundación directamente.
 
 ---
 
@@ -381,66 +380,37 @@ Si no hay DEM, el pipeline continúa pero con features topográficas limitadas (
 
 | Parámetro | Descripción |
 |---|---|
-| `crs_salida` | CRS de salida (default `EPSG:25830`) |
-| `resolution_m` | Resolución en metros. `10 m` = más detalle, mayor coste; `20 m` = más rápido |
-| `seed` | Semilla para reproducibilidad de todos los modelos |
-| `model.tile_size` | Tamaño de tile para la partición espacial y los patches U-Net/Attention U-Net/DeepLabV3+ (default `128`) |
-| `model.train_on` | `pseudo` (default) o `gt`: etiquetas con las que se entrena |
-| `model.n_folds`, `test_fold`, `val_fold` | Partición espacial por bloques (default 5 folds, test = 0, validación = 1) |
-| `filters.s1_match_target_orbit` | Restringe baseline e históricos S1 a la órbita relativa del evento (default `true`) |
-| `model.calibration` | Método de calibración: `isotonic` o `sigmoid` |
-| `model.ensemble_n` | Número de modelos en el ensemble (default `1`) |
+| `crs_salida` | CRS de salida (por defecto `EPSG:25830`) |
+| `resolution_m` | Resolución en metros: `10` = más detalle y más coste; `20` = más rápido |
+| `seed` | Semilla de la partición y de todos los modelos |
+| `model.tile_size` | Tamaño de los bloques de la partición y de los patches de las CNN (por defecto `128`) |
+| `model.train_on` | `pseudo` (por defecto) o `gt` |
+| `model.n_folds`, `test_fold`, `val_fold` | Partición espacial (por defecto 5 folds, test = 0, validación = 1) |
+| `filters.s1_match_target_orbit` | Restringe el periodo de referencia y los históricos S1 a la órbita relativa del evento (por defecto `true`) |
+| `model.calibration` | `isotonic` o `sigmoid` |
+| `model.ensemble_n` | Número de modelos en el ensemble (por defecto `1`) |
 
-- El pipeline usa caché por hash en `cache/`. Si cambias los parámetros de descarga, borra `cache/` para invalidarla.
-- Los modelos PyTorch se entrenan en GPU si está disponible (`cuda`), con fallback automático a CPU.
-- `quantile(0.5)` se usa en lugar de `median(skipna=True)` para la reducción temporal del SAR, evitando un bug de `np.ma.sort` en numpy ≥ 2.0 con arrays dask.
-- Si un asset de Sentinel no es COG, rasterio puede seguir leyendo via VSI según el servidor; si falla, revisa permisos del endpoint o cambia la colección/asset.
+- **DEM:** el pipeline no lo descarga dentro de `ingest`. Usa `scripts/download_external_data.py` o coloca un GeoTIFF local en `dem.path`. Sin DEM, el pipeline continúa sin `elevation`, `slope` ni `dist_to_permwater`.
+- **Caché:** se guarda por hash en `cache/`. Si cambias los parámetros de descarga, borra `cache/`.
+- **GPU:** los modelos PyTorch usan `cuda` si está disponible y, si no, CPU.
+- **Reproducibilidad:** U-Net y Attention U-Net son deterministas con la misma semilla; DeepLabV3+ no del todo, por operaciones CUDA no deterministas (F-11).
+- **numpy ≥ 2.0:** la reducción temporal del SAR usa `quantile(0.5)` en lugar de `median(skipna=True)` para evitar un fallo de `np.ma.sort` con arrays dask.
+- **Assets no COG:** rasterio puede leerlos vía VSI según el servidor; si falla, revisa los permisos del endpoint o cambia de colección.
 
 ---
 
 ## Referencia de comandos CLI
 
 ```bash
-floodprob stac-check  --config <yaml>                          # verifica catálogo STAC
-floodprob ingest      --config <yaml>                          # descarga imágenes
-floodprob preprocess  --config <yaml>                          # features + pseudo-etiquetas
-floodprob train       --config <yaml>                          # entrena un modelo
-floodprob predict     --config <yaml>                          # genera mapas de prob.
-floodprob evaluate    --config <yaml>                          # calcula métricas
-floodprob compare     --config <yaml> [--force-retrain]        # compara todos los modelos ★
-floodprob folium      --config <yaml> [--key <window_key>]     # vista interactiva
+floodprob stac-check  --config <yaml>                                   # verifica el catálogo STAC
+floodprob ingest      --config <yaml>                                   # descarga imágenes
+floodprob preprocess  --config <yaml>                                   # variables + pseudo-etiquetas + referencia
+floodprob compare     --config <yaml> [--train-on pseudo|gt] [--force-retrain]   # experimento multi-modelo
+floodprob train       --config <yaml>                                   # entrena un modelo
+floodprob predict     --config <yaml>                                   # genera mapas de probabilidad
+floodprob evaluate    --config <yaml>                                   # calcula métricas
+floodprob folium      --config <yaml> [--key <window_key>]              # visor interactivo
 
-# Todos los comandos aceptan --verbose / -v para logging detallado
-floodprob --verbose compare --config configs/valencia_example.yaml
+# Todos los comandos aceptan --verbose / -v
+floodprob --verbose compare --config configs/valencia_quicktest.yaml
 ```
-
----
-
-## Resultados experimentales — DANA Valencia (octubre 2024)
-
-Evaluación frente al ground truth del **Copernicus Emergency Management Service** (EMSR773: 1117 geometrías; 82 801 píxeles inundados a 20 m en el AOI, el 18,1 %). No hay Sentinel-2 durante el evento (nubes), así que todos los modelos usan **solo SAR + DEM**. Una sola pasada S1 de evento (2024-11-01, órbita relativa 110); el baseline usa la misma órbita.
-
-> Los resultados publicados antes en este README (AUC ≈ 1,0 en agua; F1 ≈ 0 en inundación) eran artefactos de fallos de etiquetado y evaluación. El detalle está en [`docs/registro_metodologico.md`](docs/registro_metodologico.md).
-
-Protocolo: partición espacial por bloques (test = 112 571 píxeles, 18,0 % inundados, los mismos para todos los modelos), umbral elegido en validación. **Una semilla y una partición:** las CNN varían mucho entre semillas; ver la tabla de semillas en el registro (A-08) antes de citar sus cifras.
-
-### Cabeza de inundación, evaluada frente a EMSR773
-
-| Modelo | AUC (pseudo) | PR-AUC (pseudo) | F1 (pseudo) | AUC (GT) | PR-AUC (GT) | F1 (GT) |
-|---|---|---|---|---|---|---|
-| Logistic Regression | 0,921 | 0,806 | **0,736** | 0,950 | 0,908 | 0,861 |
-| Random Forest | 0,836 | 0,510 | 0,327 | 0,973 | 0,945 | 0,886 |
-| XGBoost | 0,755 | 0,371 | 0,322 | 0,973 | 0,945 | 0,891 |
-| MLP | 0,879 | 0,527 | 0,326 | 0,973 | 0,945 | 0,885 |
-| U-Net | 0,933 | 0,743 | 0,247 | **0,987** | **0,967** | **0,922** |
-| Attention U-Net | 0,913 | 0,647 | 0,193 | 0,973 | 0,955 | 0,921 |
-| DeepLabV3+ ¹ | 0,946 | 0,831 | 0,763 | 0,973 | 0,958 | 0,921 |
-
-*pseudo* = entrenado solo con pseudo-etiquetas automáticas (supervisión débil). *GT* = entrenado con EMSR773 en los bloques de entrenamiento.
-¹ No determinista e inestable entre semillas (F1 con GT entre 0,35 y 0,92 en 5 semillas).
-
-Con 5 semillas, las U-Net entrenadas con GT dan F1 = 0,923 ± 0,002. Con pseudo-etiquetas dan AUC 0,92 ± 0,04 y F1 0,50 ± 0,28: el umbral elegido con pseudo-etiquetas es el principal factor de pérdida.
-
-Para regenerar las tablas: `python scripts/resumen_metricas.py outputs/valencia_quicktest_rtc/compare_{pseudo,gt}/metadata/manifest_compare.json`.
-
----
